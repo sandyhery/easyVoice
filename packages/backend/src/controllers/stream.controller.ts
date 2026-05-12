@@ -4,7 +4,8 @@ import { logger } from '../utils/logger'
 import taskManager from '../utils/taskManager'
 import { EdgeSchema } from '../schema/generate'
 import { generateTTSStream, generateTTSStreamJson } from '../services/tts.stream.service'
-import { generateId, streamWithLimit } from '../utils'
+import { generateId, streamWithLimit, readJson, fileExist } from '../utils'
+import { AUDIO_DIR, STATIC_DOMAIN } from '../config'
 function formatBody({ text, pitch, voice, volume, rate, useLLM }: EdgeSchema) {
   const positivePercent = (value: string | undefined) => {
     if (value === '0%' || value === '0' || value === undefined || value === '') return '+0%'
@@ -67,6 +68,62 @@ export async function generateJson(req: Request, res: Response, next: NextFuncti
     generateTTSStreamJson(formatedBody, task)
   } catch (error) {
     console.log(`createTaskStream error:`, error)
+    next(error)
+  }
+}
+
+/**
+ * 断点续传恢复任务
+ */
+export async function resumeTask(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { taskId } = req.params
+    const checkpointPath = path.resolve(AUDIO_DIR, `${taskId}_checkpoint.json`)
+
+    if (!(await fileExist(checkpointPath))) {
+      res.status(404).json({
+        code: 404,
+        success: false,
+        message: 'No checkpoint found for this task',
+      })
+      return
+    }
+
+    const checkpoint = await readJson<any>(checkpointPath)
+    const outputId = checkpoint.outputId
+
+    // 检查是否有已完成的文件
+    const files: string[] = []
+    let fileIndex = 1
+    while (true) {
+      const filePath = path.resolve(AUDIO_DIR, `${outputId}_${fileIndex}.mp3`)
+      if (await fileExist(filePath)) {
+        files.push(`${STATIC_DOMAIN}/${outputId}_${fileIndex}.mp3`)
+        fileIndex++
+      } else {
+        break
+      }
+    }
+
+    const result = {
+      taskId,
+      outputId,
+      checkpointIndex: checkpoint.currentIndex,
+      totalSegments: checkpoint.totalSegments,
+      progress: Number(((checkpoint.currentIndex / checkpoint.totalSegments) * 100).toFixed(2)),
+      completedFiles: files,
+      canResume: true,
+    }
+
+    logger.info(`Resume task: ${taskId}, progress: ${result.progress}%`)
+
+    res.json({
+      code: 200,
+      data: result,
+      success: true,
+    })
+  } catch (error) {
+    console.log(`resumeTask error:`, error)
     next(error)
   }
 }

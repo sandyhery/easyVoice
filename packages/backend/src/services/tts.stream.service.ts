@@ -12,6 +12,7 @@ import {
   getLangConfig,
   readJson,
   streamToResponse,
+  fileExist,
 } from '../utils'
 import { openai } from '../utils/openai'
 import { splitText } from './text.service'
@@ -248,6 +249,44 @@ export async function handleSrt(audioPath: string, stream = true) {
   if (!fileList.length) return
   concatDirSrt({ jsonFiles: fileList, inputDir: tmpDir, outputFile: audioPath })
 }
+/**
+ * 断点续传检查点接口
+ */
+interface Checkpoint {
+  taskId: string
+  outputId: string
+  currentIndex: number
+  totalSegments: number
+  completedFiles: string[]
+  lastUpdate: string
+}
+
+// 保存检查点
+async function saveCheckpoint(checkpoint: Checkpoint): Promise<void> {
+  const checkpointPath = path.resolve(AUDIO_DIR, `${checkpoint.outputId}_checkpoint.json`)
+  await fs.writeFile(checkpointPath, JSON.stringify(checkpoint, null, 2))
+  logger.info(`Checkpoint saved: ${checkpointPath}`)
+}
+
+// 加载检查点
+async function loadCheckpoint(outputId: string): Promise<Checkpoint | null> {
+  const checkpointPath = path.resolve(AUDIO_DIR, `${outputId}_checkpoint.json`)
+  if (await fileExist(checkpointPath)) {
+    const data = await readJson<Checkpoint>(checkpointPath)
+    logger.info(`Checkpoint loaded: ${data.currentIndex}/${data.totalSegments}`)
+    return data
+  }
+  return null
+}
+
+// 删除检查点
+async function deleteCheckpoint(outputId: string): Promise<void> {
+  const checkpointPath = path.resolve(AUDIO_DIR, `${outputId}_checkpoint.json`)
+  try {
+    await fs.unlink(checkpointPath)
+  } catch { /* ignore */ }
+}
+
 async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<void> {
   const { res, segment } = task.context as Required<NonNullable<Task['context']>>
   const { id: outputId } = segment
@@ -262,9 +301,19 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
   const MAX_FILE_SIZE = 500 * 1024 * 1024 // 500MB
   const progress = () => Number(((completedSegments / totalSegments) * 100).toFixed(2))
 
+  // 检查断点续传
+  const checkpoint = await loadCheckpoint(outputId)
+  let startIndex = 0
+  const files: string[] = checkpoint?.completedFiles || []
+  let currentFileIndex = files.length || 0
+
+  if (checkpoint && checkpoint.currentIndex > 0) {
+    logger.info(`Resuming from checkpoint: segment ${checkpoint.currentIndex + 1}/${totalSegments}`)
+    startIndex = checkpoint.currentIndex + 1
+    completedSegments = checkpoint.currentIndex
+  }
+
   // 文件分片：每个文件最大 500MB
-  const files: string[] = []
-  let currentFileIndex = 0
   let currentFileSize = 0
   let currentOutputStream: PassThrough | null = null
   let currentWriteStream: ReturnType<typeof createWriteStream> | null = null
@@ -284,7 +333,12 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
     logger.info(`Started new file ${currentFileIndex}: ${newFilePath}`)
   }
 
-  await startNewFile()
+  // 如果有已完成文件，恢复文件流
+  if (currentFileIndex > 0) {
+    await startNewFile()
+  } else {
+    await startNewFile()
+  }
 
   streamToResponse(res, currentOutputStream!, {
     headers: {
@@ -297,6 +351,7 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
     onEnd: () => {
       task?.endTask?.(task.id)
       logger.info(`Streaming ${task.id} finished`)
+      deleteCheckpoint(outputId)
     },
     onClose: () => {
       task?.endTask?.(task.id)
@@ -304,16 +359,40 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
     },
   })
 
+  const saveCurrentCheckpoint = async () => {
+    await saveCheckpoint({
+      taskId: task.id,
+      outputId,
+      currentIndex: completedSegments,
+      totalSegments,
+      completedFiles: files,
+      lastUpdate: new Date().toISOString(),
+    })
+  }
+
   const processSegment = async (index: number, maxRetries = 3): Promise<void> => {
     if (index >= totalSegments) {
       currentOutputStream?.end()
       task?.endTask?.(task.id)
       const audioUrls = files.map((_, i) => `${STATIC_DOMAIN}/${outputId}_${i + 1}.mp3`)
       logger.info(`Generated ${files.length} files: ${audioUrls.join(', ')}`)
+      deleteCheckpoint(outputId)
       return
     }
 
     const seg = segments[index]
+    const segFilePath = path.resolve(AUDIO_DIR, `${outputId}_${currentFileIndex}_seg_${index}.mp3`)
+
+    // 检查是否已存在该段落（断点续传）
+    const segExists = await fileExist(segFilePath)
+    if (segExists) {
+      logger.info(`Segment ${index + 1} already exists, skipping`)
+      completedSegments++
+      await saveCurrentCheckpoint()
+      await processSegment(index + 1)
+      return
+    }
+
     const generateWithRetry = async (attempt = 0): Promise<Readable> => {
       try {
         return (await generateSingleVoiceStream({
@@ -348,6 +427,10 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
       completedSegments++
       logger.info(`processing text:\n ${seg.text.slice(0, 10)}...`)
       logger.info(`Segment ${index + 1}/${totalSegments} completed. Progress: ${progress()}%`)
+
+      // 每完成一个段落保存检查点
+      await saveCurrentCheckpoint()
+
       await processSegment(index + 1)
     } catch (err) {
       const { segmentIndex, attempt, message } = err as SegmentError
@@ -357,9 +440,11 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
   }
 
   try {
-    await processSegment(0)
+    await processSegment(startIndex)
   } catch (err) {
     logger.error(`Audio processing aborted: ${(err as Error).message}`)
+    // 保存检查点以便恢复
+    await saveCurrentCheckpoint()
     !res.headersSent && res.status(500).end('Internal server error')
   }
 }
