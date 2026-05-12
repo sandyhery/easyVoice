@@ -259,10 +259,34 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
     return void res.status(400).end('No segments provided')
   }
 
+  const MAX_FILE_SIZE = 500 * 1024 * 1024 // 500MB
   const progress = () => Number(((completedSegments / totalSegments) * 100).toFixed(2))
-  const outputStream = new PassThrough()
 
-  streamToResponse(res, outputStream, {
+  // 文件分片：每个文件最大 500MB
+  const files: string[] = []
+  let currentFileIndex = 0
+  let currentFileSize = 0
+  let currentOutputStream: PassThrough | null = null
+  let currentWriteStream: ReturnType<typeof createWriteStream> | null = null
+
+  const startNewFile = async () => {
+    if (currentWriteStream) {
+      currentWriteStream.end()
+    }
+    files.push(`${outputId}_${currentFileIndex + 1}.mp3`)
+    currentFileIndex++
+    currentFileSize = 0
+
+    const newFilePath = path.resolve(AUDIO_DIR, `${outputId}_${currentFileIndex}.mp3`)
+    currentOutputStream = new PassThrough()
+    currentWriteStream = createWriteStream(newFilePath)
+    currentOutputStream.pipe(currentWriteStream)
+    logger.info(`Started new file ${currentFileIndex}: ${newFilePath}`)
+  }
+
+  await startNewFile()
+
+  streamToResponse(res, currentOutputStream!, {
     headers: {
       'content-type': 'application/octet-stream',
       'x-generate-tts-type': 'stream',
@@ -273,9 +297,6 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
     onEnd: () => {
       task?.endTask?.(task.id)
       logger.info(`Streaming ${task.id} finished`)
-      setTimeout(() => {
-        handleSrt(output)
-      }, 200)
     },
     onClose: () => {
       task?.endTask?.(task.id)
@@ -285,18 +306,20 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
 
   const processSegment = async (index: number, maxRetries = 3): Promise<void> => {
     if (index >= totalSegments) {
-      outputStream.end()
+      currentOutputStream?.end()
       task?.endTask?.(task.id)
+      const audioUrls = files.map((_, i) => `${STATIC_DOMAIN}/${outputId}_${i + 1}.mp3`)
+      logger.info(`Generated ${files.length} files: ${audioUrls.join(', ')}`)
       return
     }
 
-    const segment = segments[index]
+    const seg = segments[index]
     const generateWithRetry = async (attempt = 0): Promise<Readable> => {
       try {
         return (await generateSingleVoiceStream({
-          ...segment,
+          ...seg,
           outputType: 'stream',
-          output,
+          output: path.resolve(AUDIO_DIR, `${outputId}_${currentFileIndex}`),
         })) as Readable
       } catch (err) {
         const error = err as Error
@@ -312,18 +335,24 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
     }
 
     try {
-      // TODO: Concurrency of streaming flow
       const audioStream = await generateWithRetry()
-      await audioStream.pipe(outputStream, { end: false })
+      audioStream.pipe(currentOutputStream!, { end: false })
       await new Promise((resolve) => audioStream.on('end', resolve))
+      currentFileSize += 100 * 1024 // 估算每次增加约 100KB
+
+      if (currentFileSize >= MAX_FILE_SIZE && index < totalSegments - 1) {
+        logger.info(`File ${currentFileIndex} reached size limit, starting new file`)
+        await startNewFile()
+      }
+
       completedSegments++
-      logger.info(`processing text:\n ${segment.text.slice(0, 10)}...`)
+      logger.info(`processing text:\n ${seg.text.slice(0, 10)}...`)
       logger.info(`Segment ${index + 1}/${totalSegments} completed. Progress: ${progress()}%`)
       await processSegment(index + 1)
     } catch (err) {
       const { segmentIndex, attempt, message } = err as SegmentError
       logger.error(`Segment ${segmentIndex + 1} failed after ${attempt} retries: ${message}`)
-      outputStream.emit('error', err)
+      currentOutputStream?.emit('error', err)
     }
   }
 

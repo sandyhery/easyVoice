@@ -456,21 +456,21 @@ const playSuccessSound = () => {
   }
 }
 
-const handleFile = (file: any) => {
-  const reader = new FileReader()
+const handleFile = async (file: any) => {
   const { name, type } = file.raw
   if (type !== 'text/plain') {
     ElMessage.error('请上传 txt 文本！')
     console.log(name, type)
     return
   }
-  reader.onload = (e) => {
-    updateConfig('inputText', e.target?.result as string)
-  }
-  reader.onerror = () => {
+  try {
+    const buffer = await file.raw.arrayBuffer()
+    const bytes = new Uint8Array(buffer)
+    const text = new TextDecoder('gb18030').decode(bytes)
+    updateConfig('inputText', text)
+  } catch {
     ElMessage.error('文件读取错误，请上传 txt 文本！')
   }
-  reader.readAsText(file.raw)
 }
 
 const clearText = () => {
