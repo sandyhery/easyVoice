@@ -228,3 +228,60 @@ pnpm dev
 - 当前主要通过 Edge-TTS API 提供免费语音合成。  
 
 - 未来计划支持官方 API、Google TTS、声音克隆等功能。
+
+## 新增能力 ✨
+
+参考 AngeVoice 等多引擎 TTS 项目的设计，结合本项目特点加入以下能力：
+
+### 1. TTS 文本归一化（[normalize.service.ts](packages/backend/src/services/normalize.service.ts)）
+
+把 TTS 经常读错的"非自然语言"形式自动转成中文读法：
+
+- **数字 / 单位**：`5kg` → "五千克"，`32km` → "三十二千米"，`32°C` → "三十二摄氏度"
+- **百分号**：`12.5%` → "百分之十二点五"
+- **货币**：`¥1200` → "一千二百元"，`$12.5` → "十二点五美元"
+- **科学计数法**：`1e3` → "一千"
+- **保号语义**：`007` 不会被读成 "七"（按位读）
+- **URL / 邮箱**：自动替换为"网址链接" / "电子邮箱"
+- **英文缩写**：`Dr.` → "Doctor"，`Mr.` → "Mister"，`U.S.A.` → "United States of America"
+
+> 默认开启，作用在 `splitText` 之前。如需关闭可传 `splitText(text, 500, { normalize: false })`。
+
+测试：`cd packages/backend && npx jest tests/normalize.test.ts`（10 个用例覆盖）
+
+### 2. 多 TTS 引擎路由（[tts/dispatcher.ts](packages/backend/src/tts/dispatcher.ts)）
+
+复用项目已有的 `tts/pluginManager` 与 `tts/engines/{edge,kokoro,openai}.ts`，前端可通过 `engine` 字段切换：
+
+```bash
+curl -X POST http://localhost:3000/api/v1/tts/generate \
+  -H "Content-Type: application/json" \
+  -d '{ "text": "你好", "voice": "zh-CN-XiaoxiaoNeural", "engine": "edge-tts" }'
+```
+
+前端下拉会通过 `/api/v1/tts/engines/list` 动态拉取当前已注册的引擎。
+
+### 3. 声音预设 Voice Profile（[voiceProfile.service.ts](packages/backend/src/services/voiceProfile.service.ts)）
+
+保存一组配音参数（voice / rate / pitch / volume / engine），下次一键复用，典型场景：小说多角色。
+
+| Method | Path                          | 描述         |
+|--------|-------------------------------|------------|
+| GET    | `/api/v1/tts/profile`         | 列出全部预设 |
+| GET    | `/api/v1/tts/profile/:id`     | 详情         |
+| POST   | `/api/v1/tts/profile`         | 新建         |
+| PUT    | `/api/v1/tts/profile/:id`     | 更新         |
+| DELETE | `/api/v1/tts/profile/:id`     | 删除         |
+
+数据存于 `packages/backend/audio/.profiles/`，复用现有 `CacheService` + `FileStorage`（30 天 TTL）。
+
+### 4. 任务 stop + idle unload（[taskManager.ts](packages/backend/src/utils/taskManager.ts)）
+
+- **`POST /api/v1/tts/cancel/:taskId`**：协作式取消（让流式循环跳出，checkpoint 保留，可 resume）
+- **idle unload**：任务完成后 5 分钟自动从内存卸载，释放内存；checkpoint 还在硬盘上
+
+### 5. 前端 UI 适配
+
+- 在「语音设置」卡底部增加 **VoiceProfilePanel**：下拉选择已有预设 / 保存当前设置
+- 「生成语音」按钮旁新增 **停止生成** 按钮
+- 引擎下拉：默认 `edge-tts`，动态从 `/api/v1/tts/engines/list` 拉取
