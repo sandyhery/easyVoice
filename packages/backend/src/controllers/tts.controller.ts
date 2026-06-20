@@ -1,13 +1,21 @@
+import path from 'path'
 import { Request, Response, NextFunction } from 'express'
 import { generateTTS } from '../services/tts.service'
 import { createOpenAIClient } from '../utils/openai'
 import { logger } from '../utils/logger'
-import path from 'path'
 import { EdgeSchema } from '../schema/generate'
 import taskManager from '../utils/taskManager'
-import { buildDownloadUrl } from '../utils/fileToken'
-import { FILE_DOWNLOAD_PATH, FILE_DOWNLOAD_TTL_MS, STATIC_DOMAIN } from '../config'
+import { audioUrl } from '../config'
 import { positiveHz, positivePercent } from '../utils/format'
+import voiceListData from '../llm/prompt/voice.json'
+// tts.service.ts 里 type 用的 VoiceConfig 是 string-key 大写字段名，
+// 实际 JSON 也是这种格式，所以这里用 type assertion 一步到位
+type VoiceConfig = {
+  Name: string
+  Gender: string
+  ContentCategories: string[]
+  VoicePersonalities: string[]
+}
 
 function formatBody({ text, pitch, voice, volume, rate, useLLM, engine }: EdgeSchema) {
   return {
@@ -31,8 +39,8 @@ function withSignedUrls(result: TTSResult) {
   const srtFile = path.parse(result.srt).base
   return {
     ...result,
-    audio: buildDownloadUrl(STATIC_DOMAIN, FILE_DOWNLOAD_PATH, audioFile, FILE_DOWNLOAD_TTL_MS),
-    srt: buildDownloadUrl(STATIC_DOMAIN, FILE_DOWNLOAD_PATH, srtFile, FILE_DOWNLOAD_TTL_MS),
+    audio: audioUrl(audioFile),
+    srt: audioUrl(srtFile),
     file: audioFile,
     srtFile,
   }
@@ -105,7 +113,7 @@ export async function generateAudio(req: Request, res: Response, next: NextFunct
 export async function getVoiceList(req: Request, res: Response, next: NextFunction) {
   try {
     logger.debug('Fetching voice list...')
-    const voices = require('../llm/prompt/voice.json')
+    const voices = voiceListData as VoiceConfig[]
     res.json({
       code: 200,
       data: voices,

@@ -3,9 +3,16 @@
 *.tmp
 **/node_modules/**
 **/dist/**
-.env
+**/.env
+**/.env.*
+!.env.example
+!.env.*.example
+# 真正的 .env 在 root / backend / frontend 等任意位置都不入库
+# 但 .env.example / .env.local.example 这种模板需要保留
 **/audio
+**/logs
 **analysis**
+**/mock
 run.test.sh
 run.prod.sh
 **test**.sh

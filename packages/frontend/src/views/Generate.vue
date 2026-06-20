@@ -718,13 +718,12 @@ const generateAudioTask = async () => {
         return
       }
     }
-    const s: any = stream
-      if (stream.code && stream.data) {
-        updateAudioList(stream.data)
-        generating.value = false
-        currentTaskId.value = ''
-        return
-      }
+    // 兜底：极少数情况下 stream 是已经被 axios 解析的 JSON 对象
+    if (stream && typeof stream === 'object' && 'code' in stream && (stream as any).code && (stream as any).data) {
+      updateAudioList((stream as any).data)
+      generating.value = false
+      currentTaskId.value = ''
+      return
     }
     console.log('typeof stream:', typeof stream)
     console.log('stream instanceof ReadableStream :', stream instanceof ReadableStream)

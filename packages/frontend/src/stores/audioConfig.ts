@@ -82,7 +82,12 @@ function loadFromStorage(): Partial<AudioConfig> {
   return result
 }
 
-function savePersist(state: AudioConfig) {
+// 节流：slider 拖动时会高频调用 updateConfig，存盘做 IO 阻塞没意义
+// 300ms 已经远低于人眼可感知的延迟，又能把每秒 60 次的写盘压到 3 次
+let persistTimer: ReturnType<typeof setTimeout> | null = null
+let sessionTimer: ReturnType<typeof setTimeout> | null = null
+
+function flushPersist(state: AudioConfig) {
   if (typeof window === 'undefined') return
   try {
     const payload: Partial<AudioConfig> = {}
@@ -93,7 +98,7 @@ function savePersist(state: AudioConfig) {
   }
 }
 
-function saveSession(state: AudioConfig) {
+function flushSession(state: AudioConfig) {
   if (typeof window === 'undefined') return
   try {
     const payload: Partial<AudioConfig> = {}
@@ -102,6 +107,18 @@ function saveSession(state: AudioConfig) {
   } catch (e) {
     console.warn('Failed to persist session config:', e)
   }
+}
+
+function savePersist(state: AudioConfig) {
+  if (typeof window === 'undefined') return
+  if (persistTimer) clearTimeout(persistTimer)
+  persistTimer = setTimeout(() => flushPersist(state), 300)
+}
+
+function saveSession(state: AudioConfig) {
+  if (typeof window === 'undefined') return
+  if (sessionTimer) clearTimeout(sessionTimer)
+  sessionTimer = setTimeout(() => flushSession(state), 300)
 }
 
 export const useAudioConfigStore = defineStore('audioConfig', () => {

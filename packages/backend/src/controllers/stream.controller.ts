@@ -6,16 +6,10 @@ import { EdgeSchema } from '../schema/generate'
 import { generateTTSStream, generateTTSStreamJson } from '../services/tts.stream.service'
 import { generateId, streamWithLimit, readJson, fileExist } from '../utils'
 import { createOpenAIClient } from '../utils/openai'
-import { AUDIO_DIR, STATIC_DOMAIN, FILE_DOWNLOAD_PATH, FILE_DOWNLOAD_TTL_MS } from '../config'
+import { AUDIO_DIR, audioUrl } from '../config'
 import { positiveHz, positivePercent, formatEdgeBody } from '../utils/format'
-import { buildDownloadUrl } from '../utils/fileToken'
 
-// 保留旧 formatBody 形状（向后兼容 stream 内的 '' 兜底），由 utils/format.formatEdgeBody 统一。
-const _legacyFormatBody = ({ text, pitch, voice, volume, rate, useLLM, engine }: EdgeSchema) => {
-  void positiveHz
-  void positivePercent
-  return formatEdgeBody({ text, pitch, voice, volume, rate, useLLM, engine })
-}
+
 
 /**
  * @description 流式返回音频, 支持长文本
@@ -96,7 +90,7 @@ export async function resumeTask(req: Request, res: Response, next: NextFunction
       const fileName = `${outputId}_${fileIndex}.mp3`
       const filePath = path.resolve(AUDIO_DIR, fileName)
       if (await fileExist(filePath)) {
-        files.push(buildDownloadUrl(STATIC_DOMAIN, FILE_DOWNLOAD_PATH, fileName, FILE_DOWNLOAD_TTL_MS))
+        files.push(audioUrl(fileName))
         fileIndex++
       } else {
         break

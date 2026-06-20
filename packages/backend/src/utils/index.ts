@@ -195,14 +195,19 @@ export function streamToResponse(
     outputStream.destroy()
     return
   }
-  const streamer = inputStream.pipe(outputStream)
-  streamer.pipe(res)
-
+  // 同时往 res 和本地文件 pipe。
+  // 之前实现把 inputStream 先 pipe 到 PassThrough，再 pipe(res) + pipe(localStream)，
+  // 但 PassThrough 是 duplex 消费型，第二次 pipe 拿不到任何数据（bug）。
+  // 改成从 inputStream 直接分叉到两个目的地。
+  inputStream.pipe(res)
   if (fileName) {
     const streamFile = resolve(AUDIO_DIR, fileName)
     const localStream = createWriteStream(streamFile)
-    streamer.pipe(localStream)
+    inputStream.pipe(localStream)
+    localStream.on('error', (err) => logger.warn(`local file write error: ${err.message}`))
   }
+  // outputStream 现在没人消费，关掉防止挂起
+  outputStream.destroy()
 }
 
 interface StreamOptions {

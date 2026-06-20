@@ -1,4 +1,5 @@
-import { signDownloadToken, verifyDownloadToken, buildDownloadUrl } from '../src/utils/fileToken'
+import { signDownloadToken, verifyDownloadToken } from '../src/utils/fileToken'
+import { audioUrl } from '../src/config'
 
 describe('fileToken', () => {
   test('签发并验证合法 token', () => {
@@ -28,9 +29,10 @@ describe('fileToken', () => {
     expect(verifyDownloadToken('abc')).toBeNull()
   })
 
-  test('buildDownloadUrl 拼出符合预期的 url', () => {
-    const url = buildDownloadUrl('http://localhost:3000', '/api/v1/tts/file', 'x.mp3', 60_000)
-    expect(url.startsWith('http://localhost:3000/api/v1/tts/file/')).toBe(true)
+  test('audioUrl 拼出符合预期的 url', () => {
+    const url = audioUrl('x.mp3')
+    // 形如 `${STATIC_DOMAIN}/api/v1/tts/file/${token}`，STATIC_DOMAIN 在测试里为空字符串
+    expect(url).toMatch(/^(https?:\/\/[^/]+)?\/api\/v1\/tts\/file\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/)
     const token = url.split('/').pop()!
     expect(verifyDownloadToken(token)).toBe('x.mp3')
   })

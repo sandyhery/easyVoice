@@ -1,32 +1,35 @@
 import path from 'path'
 import fs from 'fs/promises'
-import ffmpeg from 'fluent-ffmpeg'
 import { AUDIO_DIR, audioUrl, EDGE_API_LIMIT } from '../config'
 import { logger } from '../utils/logger'
 import { getPrompt } from '../llm/prompt/generateSegment'
-import { ensureDir, generateId, getLangConfig, readJsonOrEmpty, waitForSrtSource } from '../utils'
-import { detectChapters, splitTextWithChapters, type SegmentWithChapter } from './text.service'
+import { ensureDir, generateId, getLangConfig, waitForSrtSource } from '../utils'
+import { detectChapters, splitText, splitTextWithChapters } from './text.service'
 import { normalizeForTTS } from './normalize.service'
 import { openai, createOpenAIClient, type OpenAIClient } from '../utils/openai'
-import { splitText } from './text.service'
 import { generateSingleVoice, generateSrt } from './edge-tts.service'
 import { EdgeSchema } from '../schema/generate'
-import { MapLimitController } from '../controllers/concurrency.controller'
 import audioCacheInstance from './audioCache.service'
-import { mergeSubtitleFiles, SubtitleFile, SubtitleFiles } from '../utils/subtitle'
 import taskManager, { Task } from '../utils/taskManager'
 import { handleSrt } from './tts.stream.service'
+import {
+  buildFinal,
+  concatDirAudio,
+  concatDirSrt,
+  ErrorMessages,
+  fetchLLMSegment,
+  parseLLMResponse,
+  runConcurrentTasks,
+  sortAudioDir,
+  validateLangAndVoice,
+  validateTTSResult,
+  type ConcatAudioParams,
+} from './tts.shared'
+// 复用错误枚举（向后兼容外部 import 路径）
+export { ErrorMessages } from './tts.shared'
+// 复用 concat 接口
+export type { ConcatAudioParams } from './tts.shared'
 
-// 错误消息枚举
-export enum ErrorMessages {
-  ENG_MODEL_INVALID_TEXT = 'English model cannot process non-English text',
-  API_FETCH_FAILED = 'Failed to fetch TTS parameters from API',
-  INVALID_API_RESPONSE = 'Invalid API response: no TTS parameters returned',
-  PARAMS_PARSE_FAILED = 'Failed to parse TTS parameters',
-  INVALID_PARAMS_FORMAT = 'Invalid TTS parameters format',
-  TTS_GENERATION_FAILED = 'TTS generation failed',
-  INCOMPLETE_RESULT = 'Incomplete TTS result',
-}
 
 /**
  * 生成文本转语音 (TTS) 的音频和字幕
@@ -152,31 +155,7 @@ async function generateWithLLM(
     return await buildFinal(finalSegments, id)
   }
 }
-const buildFinal = async (finalSegments: TTSResult[], id: string) => {
-  const subtitleFiles: SubtitleFiles = await Promise.all(
-    finalSegments.map((file) => {
-      const base = path.basename(file.audio)
-      const jsonPath = path.resolve(AUDIO_DIR, base.replace('.mp3', ''), 'all_splits.mp3.json')
-      return readJsonOrEmpty<SubtitleFile>(jsonPath)
-    })
-  )
 
-  const mergedJson = mergeSubtitleFiles(subtitleFiles)
-  const finalDir = path.resolve(AUDIO_DIR, id.replace('.mp3', ''))
-  await ensureDir(finalDir)
-  const finalJson = path.resolve(finalDir, '[merged]all_splits.mp3.json')
-  await fs.writeFile(finalJson, JSON.stringify(mergedJson, null, 2))
-  await generateSrt(finalJson, path.resolve(AUDIO_DIR, id.replace('.mp3', '.srt')))
-  const fileList = finalSegments.map((segment) =>
-    path.resolve(AUDIO_DIR, path.parse(segment.audio).base)
-  )
-  const outputFile = path.resolve(AUDIO_DIR, id)
-  await concatDirAudio({ inputDir: finalDir, fileList, outputFile })
-  return {
-    audio: `${audioUrl(id)}`,
-    srt: `${audioUrl(id.replace('.mp3', '.srt'))}`,
-  }
-}
 /**
  * 不使用 LLM 生成 TTS
  */
@@ -294,137 +273,4 @@ async function buildSegmentList(
     srt: `${audioUrl(id.replace('.mp3', '.srt'))}`,
     partial,
   }
-}
-
-/**
- * 并发执行任务
- */
-async function runConcurrentTasks(tasks: (() => Promise<any>)[], limit: number): Promise<any[]> {
-  logger.debug(`Running ${tasks.length} tasks with a limit of ${limit}`)
-  const controller = new MapLimitController(tasks, limit, () =>
-    logger.info('All concurrent tasks completed')
-  )
-  const { results, cancelled } = await controller.run()
-  logger.info(`Tasks completed: ${results.length}, cancelled: ${cancelled}`)
-  logger.debug(`Task results:`, results)
-  return results
-}
-
-/**
- * 验证语言和语音参数
- */
-function validateLangAndVoice(lang: string, voice: string): void {
-  if (lang !== 'eng' && voice.startsWith('en')) {
-    throw new Error(ErrorMessages.ENG_MODEL_INVALID_TEXT)
-  }
-}
-
-/**
- * 从 LLM 获取分段参数
- */
-async function fetchLLMSegment(prompt: string, client: OpenAIClient = openai): Promise<any> {
-  const response = await client.createChatCompletion({
-    messages: [
-      {
-        role: 'system',
-        content: 'You are a helpful assistant. And you can return valid json object',
-      },
-      { role: 'user', content: prompt },
-    ],
-    // temperature: 0.7,
-    // max_tokens: 500,
-    response_format: { type: 'json_object' },
-  })
-
-  if (!response.choices[0].message.content) {
-    throw new Error(ErrorMessages.INVALID_API_RESPONSE)
-  }
-  return parseLLMResponse(response)
-}
-
-/**
- * 解析 LLM 响应
- */
-function parseLLMResponse(response: any): TTSParams {
-  const params = JSON.parse(response.choices[0].message.content) as TTSParams
-  if (!params || typeof params !== 'object') {
-    throw new Error(ErrorMessages.INVALID_PARAMS_FORMAT)
-  }
-  return params
-}
-
-/**
- * 验证 TTS 结果
- */
-function validateTTSResult(result: TTSResult, segmentId: string): void {
-  if (!result.audio) {
-    throw new Error(`${ErrorMessages.INCOMPLETE_RESULT} for segment ${segmentId}`)
-  }
-}
-
-/**
- * 拼接音频文件
- */
-export async function concatDirAudio({
-  fileList,
-  outputFile,
-  inputDir,
-}: ConcatAudioParams): Promise<void> {
-  const mp3Files = sortAudioDir(fileList, '.mp3')
-  if (!mp3Files.length) throw new Error('No MP3 files found in input directory')
-
-  const tempListPath = path.resolve(inputDir, 'file_list.txt')
-  await fs.writeFile(tempListPath, mp3Files.map((file) => `file '${file}'`).join('\n'))
-
-  await new Promise<void>((resolve, reject) => {
-    ffmpeg()
-      .input(tempListPath)
-      .inputFormat('concat')
-      .inputOption('-safe', '0')
-      .audioCodec('copy')
-      .output(outputFile)
-      .on('end', () => resolve())
-      .on('error', (err) => reject(new Error(`Concat failed: ${err.message}`)))
-      .run()
-  })
-}
-
-/**
- * 拼接字幕文件
- */
-export async function concatDirSrt({
-  fileList,
-  outputFile,
-  inputDir,
-}: ConcatAudioParams): Promise<void> {
-  const jsonFiles = sortAudioDir(
-    fileList.map((file) => `${file}.json`),
-    '.json'
-  )
-  if (!jsonFiles.length) throw new Error('No JSON files found for subtitles')
-
-  const subtitleFiles: SubtitleFiles = await Promise.all(
-    jsonFiles.map((file) => readJsonOrEmpty<SubtitleFile>(file))
-  )
-  const mergedJson = mergeSubtitleFiles(subtitleFiles)
-  const tempJsonPath = path.resolve(inputDir, 'all_splits.mp3.json')
-  await fs.writeFile(tempJsonPath, JSON.stringify(mergedJson, null, 2))
-  await generateSrt(tempJsonPath, outputFile.replace('.mp3', '.srt'))
-}
-
-/**
- * 按文件名排序音频文件
- */
-function sortAudioDir(fileList: string[], ext: string = '.mp3'): string[] {
-  return fileList
-    .filter((file) => path.extname(file).toLowerCase() === ext)
-    .sort(
-      (a, b) => Number(path.parse(a).name.split('_')[0]) - Number(path.parse(b).name.split('_')[0])
-    )
-}
-
-export interface ConcatAudioParams {
-  fileList: string[]
-  outputFile: string
-  inputDir: string
 }

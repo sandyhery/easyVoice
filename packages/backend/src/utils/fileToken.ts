@@ -87,17 +87,3 @@ export function verifyDownloadToken(token: string): string | null {
   return payload.file
 }
 
-/**
- * 构造可访问的下载 URL。
- * `pathPrefix` 形如 `/api/v1/tts/file`
- */
-export function buildDownloadUrl(
-  staticDomain: string,
-  pathPrefix: string,
-  file: string,
-  ttlMs?: number,
-): string {
-  const token = signDownloadToken(file, ttlMs)
-  const prefix = pathPrefix.startsWith('/') ? pathPrefix : `/${pathPrefix}`
-  return `${staticDomain}${prefix}/${token}`
-}

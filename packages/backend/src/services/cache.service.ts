@@ -42,7 +42,8 @@ class CacheService {
 
   // 生成 key
   private generateKey(str: string): string {
-    return require('crypto').createHash('md5').update(str).digest('hex')
+    // 用 node: 前缀走 Node 类型，避开全局 DOM Crypto 接口
+    return require('node:crypto').createHash('md5').update(str).digest('hex')
   }
 
   // 设置缓存

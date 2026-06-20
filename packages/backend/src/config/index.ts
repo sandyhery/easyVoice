@@ -49,14 +49,16 @@ export const FILE_DOWNLOAD_TTL_MS = (() => {
   return 24 * 60 * 60 * 1000 // 24h
 })()
 
-import { buildDownloadUrl } from '../utils/fileToken'
+import { signDownloadToken } from '../utils/fileToken'
 
 /**
  * 用 HMAC token 拼装下载 URL，service 层调用此函数生成对外 url。
  * 集中在一个地方避免散落拼字符串。
  */
 export function audioUrl(file: string): string {
-  return buildDownloadUrl(STATIC_DOMAIN, FILE_DOWNLOAD_PATH, file, FILE_DOWNLOAD_TTL_MS)
+  const token = signDownloadToken(file, FILE_DOWNLOAD_TTL_MS)
+  const prefix = FILE_DOWNLOAD_PATH.startsWith('/') ? FILE_DOWNLOAD_PATH : `/${FILE_DOWNLOAD_PATH}`
+  return `${STATIC_DOMAIN}${prefix}/${token}`
 }
 
 // CORS 白名单

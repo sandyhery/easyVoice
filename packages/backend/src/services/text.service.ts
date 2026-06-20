@@ -3,65 +3,84 @@ import { normalizeForTTS } from './normalize.service'
 import { TEXT_SPLIT_TARGET_LENGTH } from '../config'
 
 const jieba = new Jieba()
+
+/**
+ * 按中英文句号/感叹号/问号把文本切成句，再按 targetLength 合并。
+ * 返回的每个元素 ≤ targetLength。
+ */
+function splitBySentence(text: string, targetLength: number): string[] {
+  // 用 split + 捕获分隔符，保留标点
+  const parts = text.split(/([。！？.!?])/)
+  const out: string[] = []
+  let buf = ''
+  for (let i = 0; i < parts.length; i += 2) {
+    const sentence = (parts[i] || '') + (parts[i + 1] || '')
+    if (!sentence.trim()) continue
+    if ((buf + sentence).length <= targetLength) {
+      buf += sentence
+    } else {
+      if (buf) out.push(buf.trim())
+      buf = sentence
+    }
+  }
+  if (buf) out.push(buf.trim())
+  return out
+}
+
+/**
+ * 用 jieba 把一个长句按词切到 targetLength 以内。
+ * jieba 对纯中文效果最好，对纯英文/数字串不切（这种情况下需要 char 兜底）。
+ */
+function splitByJieba(text: string, targetLength: number): string[] {
+  const out: string[] = []
+  let buf = ''
+  for (const word of jieba.cut(text)) {
+    if ((buf + word).length <= targetLength) {
+      buf += word
+    } else {
+      if (buf) out.push(buf)
+      buf = word
+    }
+  }
+  if (buf) out.push(buf)
+  return out
+}
+
+/**
+ * 字符级兜底：硬按 targetLength 切，丢掉所有语义信息但保证有结果。
+ * 用于 jieba 也救不回来的极端输入（超长纯英文/数字串）。
+ */
+function splitByChar(text: string, targetLength: number): string[] {
+  const out: string[] = []
+  for (let i = 0; i < text.length; i += targetLength) {
+    out.push(text.slice(i, i + targetLength))
+  }
+  return out
+}
+
 export function splitText(text: string, targetLength = TEXT_SPLIT_TARGET_LENGTH, opts: { normalize?: boolean } = {}) {
   // 归一化开关默认开启；调用方可传 normalize=false 跳过（例如底层测试）
   const normalized = opts.normalize === false ? text : normalizeForTTS(text)
   if (normalized.length < targetLength) return { length: 1, segments: [normalized] }
-  const segments: string[] = []
-  let currentSegment = ''
-  const sentences = normalized.split(/([。！？.!?])/)
 
-  for (let i = 0; i < sentences.length; i += 2) {
-    const sentence = (sentences[i] || '') + (sentences[i + 1] || '')
-    if (!sentence.trim()) continue
-
-    if ((currentSegment + sentence).length <= targetLength) {
-      currentSegment += sentence
+  // 1. 按句子切；2. 对仍超长的走 jieba；3. 还超长就走字符兜底
+  let segments: string[] = []
+  for (const s of splitBySentence(normalized, targetLength)) {
+    if (s.length <= targetLength) {
+      segments.push(s)
     } else {
-      if (currentSegment) {
-        segments.push(currentSegment.trim())
+      const jiebaParts = splitByJieba(s, targetLength)
+      for (const p of jiebaParts) {
+        if (p.length <= targetLength) {
+          segments.push(p)
+        } else {
+          segments.push(...splitByChar(p, targetLength))
+        }
       }
-      currentSegment = sentence
     }
   }
 
-  if (currentSegment) {
-    segments.push(currentSegment.trim())
-  }
-
-  const finalSegments = []
-  for (let segment of segments) {
-    if (segment.length <= targetLength) {
-      finalSegments.push(segment)
-    } else {
-      const words = jieba.cut(segment)
-      let subSegment = ''
-      for (let word of words) {
-        if ((subSegment + word).length <= targetLength) {
-          subSegment += word
-        } else {
-          finalSegments.push(subSegment)
-          subSegment = word
-        }
-      }
-      if (subSegment) finalSegments.push(subSegment)
-      // 字符级兜底：jieba 对纯英文/数字串不切，可能仍超长
-      const charFallback: string[] = []
-      for (const s of finalSegments) {
-        if (s.length <= targetLength) {
-          charFallback.push(s)
-        } else {
-          for (let i = 0; i < s.length; i += targetLength) {
-            charFallback.push(s.slice(i, i + targetLength))
-          }
-        }
-      }
-      finalSegments.length = 0
-      finalSegments.push(...charFallback)
-    }
-  }
-
-  return { length: finalSegments.length, segments: finalSegments }
+  return { length: segments.length, segments }
 }
 
 /**
