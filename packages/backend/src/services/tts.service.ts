@@ -5,6 +5,7 @@ import { AUDIO_DIR, audioUrl, EDGE_API_LIMIT } from '../config'
 import { logger } from '../utils/logger'
 import { getPrompt } from '../llm/prompt/generateSegment'
 import { ensureDir, generateId, getLangConfig, readJsonOrEmpty, waitForSrtSource } from '../utils'
+import { detectChapters, splitTextWithChapters, type SegmentWithChapter } from './text.service'
 import { normalizeForTTS } from './normalize.service'
 import { openai, createOpenAIClient, type OpenAIClient } from '../utils/openai'
 import { splitText } from './text.service'
@@ -42,7 +43,12 @@ export async function generateTTS(params: Required<EdgeSchema>, task?: Task, ope
     return cache
   }
 
-  const segment: Segment = { id: generateId(`${useLLM ? 'aigen-' : voice}`, text), text }
+  // 章节检测：识别"第X章/卷X/Chapter X"等标题
+  const detectedChapters = detectChapters(text)
+  // 第一个章节的元信息（用于结果标注）
+  const firstChapter = detectedChapters[0]
+
+  const segment: Segment = { id: generateId(`${useLLM ? 'aigen-' : voice}`, text, firstChapter?.index), text }
   const { lang, voiceList } = await getLangConfig(segment.text)
   logger.debug(`Language detected lang: `, lang)
   validateLangAndVoice(lang, voice)
@@ -63,6 +69,15 @@ export async function generateTTS(params: Required<EdgeSchema>, task?: Task, ope
       },
       task
     )
+  }
+
+  // 把章节信息挂到结果上（前端 DownloadList 可展示）
+  if (detectedChapters.length > 0) {
+    result.chapter = {
+      index: firstChapter!.index,
+      title: firstChapter!.title,
+      total: detectedChapters.length,
+    }
   }
 
   // 验证结果并缓存

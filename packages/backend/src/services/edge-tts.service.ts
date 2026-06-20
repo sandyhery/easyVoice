@@ -52,7 +52,23 @@ export const generateSingleVoice = async (
 export const generateSingleVoiceStream = async (
   params: Omit<EdgeSchema, 'useLLM'> & { output: string; outputType?: string }
 ) => {
-  return runEdgeTTS({ ...params, outputType: 'stream' })
+  // 流式也加重试：edge-tts 的 WebSocket 偶发会被服务端 close
+  let lastErr: unknown
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      return await runEdgeTTS({ ...params, outputType: 'stream' })
+    } catch (err) {
+      lastErr = err
+      const msg = (err as Error)?.message || String(err)
+      // 流已建立才出错，重试会重新建立连接
+      if (attempt < 3) {
+        await new Promise((r) => setTimeout(r, 600 * (attempt + 1)))
+        console.warn(`generateSingleVoiceStream retry ${attempt + 1}/3: ${msg}`)
+        continue
+      }
+    }
+  }
+  throw lastErr
 }
 
 // 定义字幕数据的类型

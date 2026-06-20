@@ -261,6 +261,7 @@
 
 <script setup lang="ts">
 import { AxiosError } from 'axios'
+import { getTask } from '@/api/tts'
 import { Sparkles } from 'lucide-vue-next'
 import { ref, computed, onMounted, watch, onBeforeMount, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -684,7 +685,10 @@ const generateAudioTask = async () => {
     const taskId = res?.headers?.['access-control-expose-headers-generate-tts-id']
       || res?.headers?.['x-generate-tts-id']
       || ''
-    if (taskId) currentTaskId.value = taskId
+    if (taskId) {
+      currentTaskId.value = taskId
+      saveActiveTask(taskId, { text: params.text, voice: params.voice, engine: params.engine })
+    }
     const stream = res?.data ?? res
     if (!(stream instanceof ReadableStream)) {
       if (stream.code && stream.data) {
@@ -777,6 +781,103 @@ const beforeUnloadHandler = async (event: BeforeUnloadEvent) => {
   }
 }
 
+
+// 跨刷新恢复：active task 存到 sessionStorage
+const ACTIVE_TASK_KEY = 'easyvoice:active-task'
+function saveActiveTask(taskId: string, snapshot: any) {
+  try { sessionStorage.setItem(ACTIVE_TASK_KEY, JSON.stringify({ taskId, snapshot, at: Date.now() })) } catch {}
+}
+function loadActiveTask(): { taskId: string; snapshot: any } | null {
+  try {
+    const raw = sessionStorage.getItem(ACTIVE_TASK_KEY)
+    if (!raw) return null
+    const obj = JSON.parse(raw)
+    if (Date.now() - (obj.at || 0) > 6 * 60 * 60 * 1000) return null // 6h 过期
+    return obj
+  } catch { return null }
+}
+function clearActiveTask() {
+  try { sessionStorage.removeItem(ACTIVE_TASK_KEY) } catch {}
+}
+
+// 组件挂载时恢复 active task
+async function recoverActiveTask() {
+  const saved = loadActiveTask()
+  if (!saved) return
+  try {
+    const res = await getTask({ id: saved.taskId })
+    if (!res?.data) { clearActiveTask(); return }
+    const task: any = res.data
+    if (task.status === 'completed' && task.result) {
+      const result = task.result
+      const entry: any = {
+        audio: result.audio,
+        file: result.file || result.srt,
+        srt: result.srt,
+        size: 0,
+        isDownloading: false,
+        isSrtLoading: false,
+        isPlaying: false,
+        progress: 100,
+        name: result.file || saved.taskId,
+      }
+      const exists = generationStore.audioList.some((a: any) => a.file === entry.file)
+      if (!exists) {
+        generationStore.updateAudioList([...generationStore.audioList, entry])
+      }
+      generationStore.updateProgress(100)
+      clearActiveTask()
+      ElMessage.success('已恢复上一次的生成结果')
+    } else if (task.status === 'pending' || task.status === 'processing') {
+      currentTaskId.value = saved.taskId
+      generating.value = true
+      generationStore.updateProgress(task.progress || 0)
+      ElMessage.info(`上次任务还在服务端运行（${task.progress || 0}%）。刷新页面无法继续流式播放，但可以查看进度。`)
+      const pollTimer = setInterval(async () => {
+        try {
+          const r = await getTask({ id: saved.taskId })
+          if (!r?.data) { clearInterval(pollTimer); return }
+          const t: any = r.data
+          generationStore.updateProgress(t.progress || 0)
+          if (t.status === 'completed' && t.result) {
+            clearInterval(pollTimer)
+            const result = t.result
+            const entry: any = {
+              audio: result.audio,
+              file: result.file || result.srt,
+              srt: result.srt,
+              size: 0,
+              isDownloading: false,
+              isSrtLoading: false,
+              isPlaying: false,
+              progress: 100,
+              name: result.file || saved.taskId,
+            }
+            const exists = generationStore.audioList.some((a: any) => a.file === entry.file)
+            if (!exists) generationStore.updateAudioList([...generationStore.audioList, entry])
+            generationStore.updateProgress(100)
+            generating.value = false
+            currentTaskId.value = ''
+            clearActiveTask()
+            ElMessage.success('任务已完成')
+          } else if (t.status === 'failed' || t.status === 'cancelled') {
+            clearInterval(pollTimer)
+            generating.value = false
+            currentTaskId.value = ''
+            clearActiveTask()
+            ElMessage.warning(`任务${t.status === 'failed' ? '失败' : '已取消'}: ${t.message || ''}`)
+          }
+        } catch { /* 忽略轮询错误 */ }
+      }, 3000)
+    } else {
+      clearActiveTask()
+    }
+  } catch (e) {
+    console.warn('recoverActiveTask failed:', e)
+    clearActiveTask()
+  }
+}
+
 // 组件挂载时添加事件监听
 onBeforeMount(() => {
   window.addEventListener('beforeunload', beforeUnloadHandler)
@@ -797,6 +898,8 @@ onMounted(async () => {
     updateConfig('engine', 'edge-tts')
   }
   loadEngines()
+  // 跨刷新恢复上一次未完成的任务
+  recoverActiveTask()
 })
 </script>
 

@@ -13,6 +13,11 @@ export interface Audio {
   blobs?: Blob[]
   name?: string
   download?: () => void
+  chapter?: {
+    index: number
+    title: string
+    total: number
+  }
 }
 
 export const useGenerationStore = defineStore(

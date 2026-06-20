@@ -7,6 +7,11 @@ interface TTSResult {
   audio: string
   srt: string
   partial?: boolean
+  chapter?: {
+    index: number
+    title: string
+    total: number
+  }
 }
 
 interface TTSParams {

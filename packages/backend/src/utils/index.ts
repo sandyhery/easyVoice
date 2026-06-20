@@ -85,9 +85,10 @@ function defaultErrorHandler(err: unknown, attempt: number): void {
 export async function asyncSleep(delay = 200) {
   return new Promise((resolve) => setTimeout(resolve, delay))
 }
-export function generateId(voice: string, text: string) {
+export function generateId(voice: string, text: string, chapterIndex?: number) {
   const now = Date.now()
-  return `${voice}-${safeFileName(text).slice(0, 10)}-${now}.mp3`
+  const chapterTag = chapterIndex && chapterIndex > 0 ? `ch${chapterIndex}-` : ''
+  return `${voice}-${chapterTag}${safeFileName(text).slice(0, 10)}-${now}.mp3`
 }
 export function safeFileName(fileName: string) {
   return fileName.replace(/[/\\?%*:|"<>\r\n\s#]/g, '-')

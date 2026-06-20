@@ -17,7 +17,7 @@ import {
   waitForSrtSource,
 } from '../utils'
 import { openai, type OpenAIClient } from '../utils/openai'
-import { splitText } from './text.service'
+import { splitText, detectChapters } from './text.service'
 import { normalizeForTTS } from './normalize.service'
 import { generateSingleVoiceStream, generateSrt } from './edge-tts.service'
 import { EdgeSchema } from '../schema/generate'
@@ -45,7 +45,10 @@ enum ErrorMessages {
 export async function generateTTSStream(params: Required<EdgeSchema>, task: Task, openaiClient?: OpenAIClient) {
   const { pitch, voice, rate, volume, useLLM } = params
   const text = normalizeForTTS((params.text || '').trim())
-  const segment: Segment = { id: generateId(useLLM ? 'aigen-' : voice, text), text }
+  // 章节检测（流式也用）
+  const _detected = detectChapters(text)
+  const _firstChapter = _detected[0]
+  const segment: Segment = { id: generateId(useLLM ? 'aigen-' : voice, text, _firstChapter?.index), text }
   const { lang, voiceList } = await getLangConfig(segment.text)
   logger.debug(`Language detected lang: `, lang)
   task!.context!.segment = segment

@@ -26,6 +26,15 @@
         <!-- 文件信息 -->
         <div class="file-info">
           <span class="filename">{{ item.file }}</span>
+          <el-tag
+            v-if="item.chapter"
+            size="small"
+            type="info"
+            effect="plain"
+            style="margin-left: 8px"
+          >
+            {{ item.chapter.title }} ({{ item.chapter.index }}/{{ item.chapter.total }})
+          </el-tag>
           <span class="file-size">{{ formatFileSize(item.size || 0) }}</span>
         </div>
 
