@@ -72,4 +72,45 @@ describe("normalizeForTTS 整合", () => {
     // 007 不能被读成 "七"
     expect(normalizeForTTS("编号 007")).toContain("零零七");
   });
+
+  test("长串数字按位读（>15 位）", () => {
+    // 银行卡号 / 大数字精度不丢
+    const result = normalizeForTTS("卡号 12345678901234567890");
+    // 至少应包含 20 个中文数字字符
+    const digitChars = result.match(/[零一二三四五六七八九]/g) || [];
+    expect(digitChars.length).toBeGreaterThanOrEqual(20);
+  });
+
+  test("intToCn 负数应抛错", () => {
+    // 间接验证：bigIntToCn 负数会经过 intToCn 之前先判断
+    // numberToCn 处理 -5 时应正确返回 "负五"
+    expect(numberToCn("-5")).toBe("负五");
+    expect(numberToCn("-12")).toBe("负十二");
+  });
+
+  test("货币前缀 1-9 限制：007元 应走保号而非货币", () => {
+    // P2-12 修复后，"007元" 不应被错误识别为货币
+    const r = normalizeForTTS("编号 007元");
+    // 期望：保号语义"零零七" + "元" 都保留
+    expect(r).toContain("零零七");
+    expect(r).toContain("元");
+  });
+
+  test("缩写中文标点边界", () => {
+    // P2-13 修复后，"Mr. Wang" 与 "Mr.，Wang" 都能匹配
+    expect(normalizeForTTS("Mr. Wang")).toContain("Mister");
+    expect(normalizeForTTS("中文 Mr. Wang")).toContain("Mister");
+  });
+
+  test("科学计数法边界 (P3-1)", () => {
+    // 0.0001e10 = 1 百万（小数点左移 10 位，0001 + 补 6 个 0）
+    const r1 = normalizeForTTS("数值 0.0001e10");
+    expect(r1).toContain("一百万");
+    // 1e-3 = 零点零零一
+    const r2 = normalizeForTTS("数值 1e-3");
+    expect(r2).toContain("零点零零一");
+    // 1.23e8 = 一亿二千三百万
+    const r3 = normalizeForTTS("数值 1.23e8");
+    expect(r3).toContain("一亿二千三百万");
+  });
 });

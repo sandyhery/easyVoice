@@ -132,6 +132,11 @@ async function generateWithLLMStream(task: Task, openaiClient?: OpenAIClient) {
     outputStream.pipe(localStream)
 
     for (let seg of segments) {
+      // 协作式取消
+      if (task.cancelled) {
+        logger.info(`LLM loop cancelled at ${count}/${segments.length}`)
+        break
+      }
       count++
       const prompt = getPrompt(lang, voiceList, seg)
       logger.debug(`Prompt for LLM: ${prompt}`)
@@ -143,6 +148,10 @@ async function generateWithLLMStream(task: Task, openaiClient?: OpenAIClient) {
         )
       }
       for (let segment of formatLlmSegments(llmSegments)) {
+        if (task.cancelled) {
+          logger.info(`LLM inner loop cancelled`)
+          break
+        }
         const stream = (await generateSingleVoiceStream({
           ...segment,
           output,
@@ -151,9 +160,20 @@ async function generateWithLLMStream(task: Task, openaiClient?: OpenAIClient) {
         stream.pipe(outputStream, { end: false })
         await new Promise((resolve) => {
           stream.on('end', resolve)
+          // 如果 task 取消，强制结束 stream 的等待
+          if (task.cancelled) {
+            stream.destroy?.()
+            resolve(undefined)
+          }
         })
       }
       logger.info(`Progress: ${getProgress()}%`)
+    }
+    if (task.cancelled) {
+      logger.info(`LLM stream ended (cancelled) at ${count}/${segments.length}`)
+      outputStream.end()
+      try { res.end() } catch {}
+      return
     }
     outputStream.end()
     try {
@@ -220,11 +240,17 @@ async function buildSegment(params: TTSParams, task: Task, dir: string = '') {
     headers: {
       'content-type': 'application/octet-stream',
       'x-generate-tts-type': 'stream',
-      'Access-Control-Expose-Headers-generate-tts-id': task.id,
+      'x-generate-tts-id': task.id,
+      'Access-Control-Expose-Headers': 'x-generate-tts-type, x-generate-tts-id',
     },
     fileName: segment.id,
     onError: (err) => `Custom error: ${err.message}`,
     onEnd: () => {
+      // 已被用户取消则不要再 endTask 把状态翻回 completed
+      if (task.cancelled) {
+        logger.info(`Streaming ${task.id} ended (cancelled)`)
+        return
+      }
       task?.endTask?.(task.id)
       logger.info(`Streaming ${task.id} finished`)
       waitForSrtSource(output)
@@ -364,11 +390,17 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
     headers: {
       'content-type': 'application/octet-stream',
       'x-generate-tts-type': 'stream',
-      'Access-Control-Expose-Headers-generate-tts-id': task.id,
+      'x-generate-tts-id': task.id,
+      'Access-Control-Expose-Headers': 'x-generate-tts-type, x-generate-tts-id',
     },
     onError: (err) => `Custom error: ${err.message}`,
     fileName: segment.id,
     onEnd: () => {
+      // 取消时不要 endTask（endTask 会把状态翻回 completed，破坏状态机）
+      if (task.cancelled) {
+        logger.info(`Streaming ${task.id} ended (cancelled)`)
+        return
+      }
       task?.endTask?.(task.id)
       logger.info(`Streaming ${task.id} finished`)
       deleteCheckpoint(outputId)
@@ -441,6 +473,13 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
 
     try {
       const audioStream = await generateWithRetry()
+      // 启动 pipe 前再检查一次（流启动可能赶上 cancel）
+      if (task.cancelled) {
+        logger.info(`Task ${task.id} cancelled before pipe segment ${index + 1}`)
+        audioStream.destroy?.()
+        currentOutputStream?.end()
+        return
+      }
       audioStream.pipe(currentOutputStream!, { end: false })
       await new Promise((resolve) => audioStream.on('end', resolve))
 

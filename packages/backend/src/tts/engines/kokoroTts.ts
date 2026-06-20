@@ -1,5 +1,6 @@
 import { TTSEngine, TtsOptions } from '../types'
 import { fetcher } from '../../utils/request'
+import { logger } from '../../utils/logger'
 import { Readable } from 'stream' // Node.js 流支持
 
 // Kokoro 支持的音频格式
@@ -47,7 +48,15 @@ export class KokoroTtsEngine implements TTSEngine {
       speed = 1.0,
       format = 'mp3',
       stream = false, // 默认一次性返回 Buffer
+      pitch,
+      volume,
+      style,
     } = options
+
+    // 显式 warn 静默丢弃的参数（让上层知道该引擎不支持这些）
+    if (pitch !== undefined) logger.warn(`Kokoro engine ignores pitch=${pitch}`)
+    if (volume !== undefined) logger.warn(`Kokoro engine ignores volume=${volume}`)
+    if (style !== undefined) logger.warn(`Kokoro engine ignores style=${style}`)
 
     if (typeof text !== 'string' || text.length === 0) {
       throw new Error('Input text is required.')

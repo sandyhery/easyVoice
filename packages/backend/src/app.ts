@@ -6,6 +6,7 @@ import { setupRoutes } from './routes'
 import { registerEngines } from './tts/engines'
 import { ttsPluginManager } from './tts/pluginManager'
 import { errorHandler } from './middleware/error.middleware'
+import audioCacheInstance from './services/audioCache.service'
 
 // 应用配置接口
 interface AppConfig {
@@ -41,5 +42,19 @@ export function createApp(config: AppConfig): Application {
 
   registerEngines()
   app.use(errorHandler)
+
+  // 启动后台清理：每小时清一次过期 audio cache（默认 TTL 365 天）
+  const cleanTimer = setInterval(
+    () => {
+      audioCacheInstance
+        .cleanExpired()
+        .catch((err) => logger.warn('audio cache clean failed: ' + (err as Error).message))
+    },
+    60 * 60 * 1000
+  )
+  cleanTimer.unref?.()
+  // 进程退出时清定时器
+  app.on('close', () => clearInterval(cleanTimer))
+
   return app
 }

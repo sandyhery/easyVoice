@@ -1,7 +1,9 @@
 import fs from 'fs/promises'
+import { Readable } from 'stream'
 import { EdgeSchema } from '../schema/generate'
 import { EdgeTTS } from '../lib/node-edge-tts/edge-tts-fixed'
 import { fileExist, readJson, safeRunWithRetry } from '../utils'
+import { synthesizeWithEngine } from '../tts/dispatcher'
 
 export async function runEdgeTTS({
   text,
@@ -9,9 +11,24 @@ export async function runEdgeTTS({
   volume,
   voice,
   rate,
+  engine,
   output,
   outputType = 'file',
 }: Omit<EdgeSchema, 'useLLM'> & { output: string; outputType?: string }) {
+  // 非默认引擎：走 pluginManager 路由
+  if (engine && engine !== 'edge-tts') {
+    return synthesizeWithEngine({
+      engine,
+      text,
+      voice,
+      rate,
+      pitch,
+      volume,
+      output,
+      saveSubtitles: true,
+      outputType: outputType as 'buffer' | 'stream' | 'file',
+    })
+  }
   const lang = /([a-zA-Z]{2,5}-[a-zA-Z]{2,5}\b)/.exec(voice)?.[1]
   const tts = new EdgeTTS({
     voice,

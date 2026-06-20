@@ -91,7 +91,9 @@ export const createTask = async (data: TaskRequest) => {
   return response.data
 }
 
-export const createTaskStream = async (data: TaskRequest) => {
+export const createTaskStream = async (
+  data: TaskRequest
+): Promise<{ stream: ReadableStream | null; json?: ResponseWrapper<GenerateResponse>; taskId: string }> => {
   const response = await api.post<ReadableStream | ResponseWrapper<GenerateResponse>>(
     `/createStream`,
     data,
@@ -103,26 +105,42 @@ export const createTaskStream = async (data: TaskRequest) => {
   )
   const ttsType = response.headers['x-generate-tts-type']
   const contentType = response.headers['content-type']
-  const taskId = response.headers['access-control-expose-headers-generate-tts-id']
-    || response.headers['x-generate-tts-id']
-    || ''
-  if (
-    response.status !== 200 ||
-    ttsType === 'application/json' ||
-    contentType?.includes?.('application/json')
-  ) {
+  // 后端在流式响应头里挂 task.id，前端通过 x-generate-tts-id 读取
+  // （同时通过 Access-Control-Expose-Headers 暴露给浏览器）
+  const taskId =
+    response.headers['x-generate-tts-id'] ||
+    response.headers['access-control-expose-headers-generate-tts-id'] ||
+    ''
+  if (response.status !== 200 || ttsType === 'application/json' || contentType?.includes?.('application/json')) {
     const text = await new Response(response.data as any).text()
-    const responseData = JSON.parse(text)
-    return { data: responseData, taskId }
+    const json = JSON.parse(text)
+    return { stream: null, json, taskId }
   }
-  return { data: response.data as ReadableStream, taskId }
+  return { stream: response.data as ReadableStream, taskId }
 }
 
 export const downloadFile = (file: string) => `${api.defaults.baseURL}/download/${file}`
 
+/**
+ * 把 Edge 风格的 "+10%" / "-3Hz" 字符串转成 number。
+ *  - "+5%"  -> 5
+ *  - "-3Hz" -> -3
+ *  - "0%"   -> 0
+ *  - ""     -> 0
+ *  - 非法   -> 0
+ */
+export const parseSignedValue = (s?: string): number => {
+  if (!s) return 0
+  const n = parseInt(String(s).replace(/[^0-9+\-]/g, ''), 10)
+  return Number.isFinite(n) ? n : 0
+}
+
 // ====== 新增：引擎列表 ======
 export interface EngineInfo {
   name: string
+  displayName?: string
+  supported?: boolean
+  description?: string
 }
 export const listEngines = async () => {
   const response = await api.get<ResponseWrapper<EngineInfo[]>>('/engines/list')
@@ -145,11 +163,11 @@ export interface VoiceProfile {
   id: string
   name: string
   voice: string
+  engine: string
   rate?: string
   pitch?: string
   volume?: string
   style?: string
-  engine?: string
   description?: string
   createdAt: string
   updatedAt: string

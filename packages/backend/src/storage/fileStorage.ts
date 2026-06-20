@@ -58,6 +58,10 @@ export class FileStorage extends BaseStorage {
   }
 
   private getFilePath(key: string): string {
+    // path traversal 防御：只允许 md5 hex 32 位的 key
+    if (!/^[a-f0-9]{32}$/.test(key)) {
+      throw new Error(`FileStorage: invalid key "${key}" (must be md5 hex 32)`)
+    }
     return path.join(this.cacheDir, `${key}.json`)
   }
 
@@ -68,9 +72,13 @@ export class FileStorage extends BaseStorage {
   async set<T>(key: string, value: T): Promise<boolean> {
     await this.ready()
     const filePath = this.getFilePath(key)
+    const tmpPath = filePath + '.tmp'
     const expireAt = (value as any)?.expireAt ?? 0
     const data = JSON.stringify(value, null, 2)
-    await fs.writeFile(filePath, data, 'utf8')
+    // 原子写：先写 .tmp，再 rename（POSIX 上 rename 是原子的）
+    // 避免读到半写文件 + 避免与并发 set 互相覆盖
+    await fs.writeFile(tmpPath, data, 'utf8')
+    await fs.rename(tmpPath, filePath)
     const stat = await fs.stat(filePath)
     this.index.set(key, { expireAt, mtime: stat.mtimeMs })
     return true
@@ -87,7 +95,7 @@ export class FileStorage extends BaseStorage {
     // 外部可能删了文件，mtime 检测降级
     try {
       const stat = await fs.stat(this.getFilePath(key))
-      if (Math.abs(stat.mtimeMs - meta.mtime) > 1) {
+      if (Math.abs(stat.mtimeMs - meta.mtime) > 100) {
         // 外部改动，重读
         this.index.set(key, { ...meta, mtime: stat.mtimeMs })
       }

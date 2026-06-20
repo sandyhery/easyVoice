@@ -60,7 +60,7 @@
               >
                 <el-radio-button label="ai">
                   AI 推荐
-                  <Sparkles class="sparkles-icon" :size="24" :stroke-width="1.25" />
+                  <Sparkles class="sparkles-icon" :size="24" :stroke-width="1.25" aria-hidden="true" />
                 </el-radio-button>
               </el-tooltip>
             </el-radio-group>
@@ -144,7 +144,11 @@
               </el-form-item>
 
               <el-form-item label="引擎">
-                <el-select v-model="audioConfig.engine" placeholder="选择 TTS 引擎">
+                <el-select
+                  v-model="audioConfig.engine"
+                  placeholder="选择 TTS 引擎"
+                  :disabled="generating"
+                >
                   <el-option
                     v-for="e in engines"
                     :key="e.name"
@@ -210,7 +214,7 @@
             <audio
               ref="audioPlayer"
               v-show="audioConfig.previewAudioUrl"
-              controls="false"
+              controls
               class="preview-audio"
               :src="audioConfig.previewAudioUrl"
             ></audio>
@@ -229,7 +233,7 @@
         生成语音
       </el-button>
       <el-button
-        v-if="generating && currentTaskId"
+        v-if="generating"
         type="warning"
         size="large"
         @click="handleCancel"
@@ -290,6 +294,8 @@ import {
   cancelTask,
   listEngines,
   type EngineInfo,
+  parseSignedValue,
+  type VoiceProfile,
 } from '@/api/tts'
 
 const generationStore = useGenerationStore()
@@ -555,12 +561,18 @@ const buildParams = (text: string) => {
   return params
 }
 
-const applyProfile = (p: any) => {
+const applyProfile = (p: VoiceProfile) => {
   if (p.voice) updateConfig('selectedVoice', p.voice)
-  if (p.rate) updateConfig('rate', Number(p.rate) || 0)
-  if (p.pitch) updateConfig('pitch', Number(p.pitch) || 0)
-  if (p.volume) updateConfig('volume', Number(p.volume) || 0)
+  if (p.rate !== undefined) updateConfig('rate', parseSignedValue(p.rate))
+  if (p.pitch !== undefined) updateConfig('pitch', parseSignedValue(p.pitch))
+  if (p.volume !== undefined) updateConfig('volume', parseSignedValue(p.volume))
   if (p.engine) updateConfig('engine', p.engine)
+  // 跨语种预设：先把 language/gender 调成 voice 的语言，再设 voice
+  if (p.voice) {
+    const langPrefix = p.voice.split('-').slice(0, 2).join('-')
+    if (langPrefix) updateConfig('selectedLanguage', langPrefix)
+    updateConfig('selectedGender', 'All')
+  }
   ElMessage.success(`已应用预设：${p.name}`)
 }
 
@@ -583,9 +595,15 @@ const loadEngines = async () => {
     const res = await listEngines()
     if (res.code === 200 && res.data?.length) {
       engines.value = res.data
+      // 校验用户持久化的 engine 是否还在新列表中，不在则 fallback
+      const persistedEngine = audioConfig.engine
+      if (persistedEngine && !engines.value.some(e => e.name === persistedEngine)) {
+        updateConfig('engine', engines.value[0].name)
+      }
     }
-  } catch {
-    /* 静默失败：保留默认 edge-tts */
+  } catch (e) {
+    console.warn('loadEngines failed:', e)
+    ElMessage.warning('引擎列表加载失败，仅可使用默认引擎')
   }
 }
 
@@ -680,17 +698,27 @@ const generateAudioTask = async () => {
 
   try {
     const params = buildParams(inputText)
-    const res: any = await createTaskStream(params)
-    // res 可能是 { headers, data }，也可能是裸 ReadableStream/JSON
-    const taskId = res?.headers?.['access-control-expose-headers-generate-tts-id']
-      || res?.headers?.['x-generate-tts-id']
-      || ''
+    const { stream, json, taskId } = await createTaskStream(params)
     if (taskId) {
       currentTaskId.value = taskId
       saveActiveTask(taskId, { text: params.text, voice: params.voice, engine: params.engine })
     }
-    const stream = res?.data ?? res
-    if (!(stream instanceof ReadableStream)) {
+    // 命中缓存 / 短文本：服务端返回 JSON 而非流
+    if (!stream) {
+      if (json?.code === 200 && json.data) {
+        updateAudioList(json.data)
+        generating.value = false
+        currentTaskId.value = ''
+        return
+      }
+      if (json && (json.code || json.message)) {
+        ElMessage.error(json.message || '生成失败')
+        generating.value = false
+        currentTaskId.value = ''
+        return
+      }
+    }
+    const s: any = stream
       if (stream.code && stream.data) {
         updateAudioList(stream.data)
         generating.value = false
@@ -757,6 +785,8 @@ const generateAudioTask = async () => {
     generating.value = false
   }
 }
+// 收集所有活动轮询 timer，组件卸载时统一清理
+const activePollTimers = new Set<ReturnType<typeof setInterval>>()
 const beforeUnloadHandler = async (event: BeforeUnloadEvent) => {
   console.log(`beforeUnloadHandler:`, event.target)
   if (generationStore.audioList.length > 0) {
@@ -834,13 +864,14 @@ async function recoverActiveTask() {
       generationStore.updateProgress(task.progress || 0)
       ElMessage.info(`上次任务还在服务端运行（${task.progress || 0}%）。刷新页面无法继续流式播放，但可以查看进度。`)
       const pollTimer = setInterval(async () => {
+        activePollTimers.add(pollTimer)
         try {
           const r = await getTask({ id: saved.taskId })
-          if (!r?.data) { clearInterval(pollTimer); return }
+          if (!r?.data) { clearInterval(pollTimer); activePollTimers.delete(pollTimer); return }
           const t: any = r.data
           generationStore.updateProgress(t.progress || 0)
           if (t.status === 'completed' && t.result) {
-            clearInterval(pollTimer)
+            clearInterval(pollTimer); activePollTimers.delete(pollTimer)
             const result = t.result
             const entry: any = {
               audio: result.audio,
@@ -861,7 +892,7 @@ async function recoverActiveTask() {
             clearActiveTask()
             ElMessage.success('任务已完成')
           } else if (t.status === 'failed' || t.status === 'cancelled') {
-            clearInterval(pollTimer)
+            clearInterval(pollTimer); activePollTimers.delete(pollTimer)
             generating.value = false
             currentTaskId.value = ''
             clearActiveTask()
@@ -884,20 +915,24 @@ onBeforeMount(() => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', beforeUnloadHandler)
+  // 清理所有活动轮询
+  for (const t of activePollTimers) clearInterval(t)
+  activePollTimers.clear()
 })
 onMounted(async () => {
   successAudio.value = new Audio(Notification)
+  // 默认引擎，避免渲染时下拉为空
+  if (!audioConfig.engine) {
+    updateConfig('engine', 'edge-tts')
+  }
+  // engines 必须先就绪再渲染，否则持久化的非默认 engine 会被下拉回退
+  await loadEngines()
   try {
     const response = await getVoiceList()
     voiceList.value = response?.data!
   } catch (error) {
     handle429(error)
   }
-  // 默认引擎，避免渲染时下拉为空
-  if (!audioConfig.engine) {
-    updateConfig('engine', 'edge-tts')
-  }
-  loadEngines()
   // 跨刷新恢复上一次未完成的任务
   recoverActiveTask()
 })

@@ -45,6 +45,19 @@ export function splitText(text: string, targetLength = TEXT_SPLIT_TARGET_LENGTH,
         }
       }
       if (subSegment) finalSegments.push(subSegment)
+      // 字符级兜底：jieba 对纯英文/数字串不切，可能仍超长
+      const charFallback: string[] = []
+      for (const s of finalSegments) {
+        if (s.length <= targetLength) {
+          charFallback.push(s)
+        } else {
+          for (let i = 0; i < s.length; i += targetLength) {
+            charFallback.push(s.slice(i, i + targetLength))
+          }
+        }
+      }
+      finalSegments.length = 0
+      finalSegments.push(...charFallback)
     }
   }
 

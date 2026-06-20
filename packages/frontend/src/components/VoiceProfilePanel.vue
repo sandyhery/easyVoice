@@ -2,7 +2,14 @@
   <div class="voice-profile-panel">
     <div class="profile-header">
       <span class="label">声音预设</span>
-      <el-button link type="primary" @click="loadProfiles" :icon="Refresh" circle />
+      <el-button
+        link
+        type="primary"
+        @click="loadProfiles"
+        :icon="Refresh"
+        circle
+        aria-label="刷新预设列表"
+      />
     </div>
 
     <div class="profile-row">
@@ -23,6 +30,14 @@
           <div class="profile-option">
             <span class="profile-name">{{ p.name }}</span>
             <span class="profile-voice">{{ p.voice }}</span>
+            <el-button
+              link
+              type="danger"
+              :icon="Delete"
+              size="small"
+              class="profile-delete"
+              @click.stop="onDeleteClick(p.id, $event)"
+            />
           </div>
         </el-option>
       </el-select>
@@ -63,7 +78,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Plus } from '@element-plus/icons-vue'
+import { Refresh, Plus, Delete } from '@element-plus/icons-vue'
 import {
   listProfiles,
   createProfile,
@@ -113,6 +128,11 @@ const onSelect = async (id: string) => {
   if (!id) return
   const p = profiles.value.find((x) => x.id === id)
   if (p) emit('apply', p)
+}
+
+const onDeleteClick = async (id: string, e: Event) => {
+  e.stopPropagation()
+  await removeProfile(id)
 }
 
 const openSaveDialog = () => {
@@ -206,6 +226,17 @@ onMounted(loadProfiles)
 .profile-option {
   display: flex;
   flex-direction: column;
+  position: relative;
+}
+.profile-delete {
+  position: absolute;
+  right: 0;
+  top: 0;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.profile-option:hover .profile-delete {
+  opacity: 1;
 }
 .profile-name {
   font-size: 14px;

@@ -18,7 +18,8 @@ export class EdgeTtsEngine implements TTSEngine {
       output,
     } = options
     let finaleType = outputType ? outputType : stream ? 'stream' : 'buffer'
-    const lang = /([a-zA-Z]{2,5}-[a-zA-Z]{2,5}\b)/.exec(voice)?.[1]
+    // 严格匹配开头的小写-大写两段：en-US-AriaNeural -> en-US
+    const lang = /^([a-z]{2,3}-[A-Z]{2,3})/.exec(voice)?.[1]
     const tts = new EdgeTTS({
       voice,
       lang,

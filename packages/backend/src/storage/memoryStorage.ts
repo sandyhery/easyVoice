@@ -15,7 +15,7 @@ export class MemoryStorage extends BaseStorage {
   }
 
   async get<T>(key: string): Promise<T | null> {
-    return this.cache.get(key) || null;
+    return this.cache.has(key) ? (this.cache.get(key) ?? null) : null
   }
 
   async delete(key: string): Promise<void> {
@@ -23,11 +23,12 @@ export class MemoryStorage extends BaseStorage {
   }
 
   async cleanExpired(): Promise<void> {
-    const now = Date.now();
+    const now = Date.now()
+    // 先 snapshot，再删除（避免迭代中修改 Map）
+    const toDelete: string[] = []
     for (const [key, item] of this.cache) {
-      if (item.expireAt < now) {
-        this.cache.delete(key);
-      }
+      if (item?.expireAt < now) toDelete.push(key)
     }
+    for (const key of toDelete) this.cache.delete(key)
   }
 }

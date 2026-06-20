@@ -5,7 +5,19 @@
       <div class="progress-container">
         <div class="time current-time">{{ formatTime(currentTime) }}</div>
         <div class="progress-bar-container">
-          <div class="progress-bar" @mousedown="seek" ref="progressBar">
+          <div
+            class="progress-bar"
+            @mousedown="seek"
+            ref="progressBar"
+            role="slider"
+            tabindex="0"
+            :aria-valuemin="0"
+            :aria-valuemax="Math.round(duration) || 0"
+            :aria-valuenow="Math.round(currentTime)"
+            :aria-label="`音频进度 ${formatTime(currentTime)} / ${formatTime(duration)}`"
+            @keydown.left.prevent="audio && audio.currentTime && (audio.currentTime = Math.max(0, audio.currentTime - 5))"
+            @keydown.right.prevent="audio && audio.currentTime && (audio.currentTime = Math.min(duration, audio.currentTime + 5))"
+          >
             <!-- 添加分段颜色 -->
             <div class="progress-segments">
               <div
@@ -51,6 +63,7 @@
 import Hero from '@/assets/hero.mp3'
 import { VideoPause, CaretRight, ChatLineRound } from '@element-plus/icons-vue'
 import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ElMessage } from 'element-plus'
 import zhCNYunyangNeural from '@/assets/avatar/zh-CN-YunyangNeural.png'
 import zhCNXiaoxiaoNeural from '@/assets/avatar/zh-CN-XiaoxiaoNeural.png'
 import zhCNYunxiNeural from '@/assets/avatar/zh-CN-YunxiNeural.png'
@@ -63,6 +76,7 @@ defineOptions({
 
 const progressBar = ref<HTMLElement | null>(null)
 const audio = ref<HTMLAudioElement | null>(null)
+const pendingSeekFraction = ref<number>(0)
 const isPlaying = ref(false)
 const currentTime = ref(0)
 const currentVoice = ref()
@@ -148,10 +162,13 @@ onMounted(() => {
   audio.value = new Audio(Hero)
   audio.value.addEventListener('timeupdate', updateProgress)
   audio.value.addEventListener('loadedmetadata', () => {
-    duration.value = audio.value!.duration
+    duration.value = Number.isFinite(audio.value!.duration) ? audio.value!.duration : 0
   })
   audio.value.addEventListener('ended', () => {
     isPlaying.value = false
+  })
+  audio.value.addEventListener('error', () => {
+    ElMessage?.error?.('音频加载失败') || console.error('audio load failed')
   })
   audio.value.load()
 })
@@ -166,19 +183,22 @@ onBeforeUnmount(() => {
 
 const togglePlay = () => {
   if (!audio.value) return
-  ;(globalThis as any).audio = audio.value
   if (isPlaying.value) {
     audio.value.pause()
+    isPlaying.value = false
   } else {
-    audio.value.play()
+    audio.value.play().catch((e) => {
+      console.warn('audio play rejected:', e)
+      isPlaying.value = false
+    })
+    isPlaying.value = true
   }
-  isPlaying.value = !isPlaying.value
 }
 
 const updateProgress = () => {
   if (!audio.value) return
   currentTime.value = audio.value.currentTime
-  progressPercent.value = (currentTime.value / duration.value) * 100 || 0
+  progressPercent.value = duration.value > 0 ? (currentTime.value / duration.value) * 100 : 0
 
   const currentSegment = voiceSegments.find(
     (segment) => currentTime.value >= segment.start && currentTime.value < segment.end
@@ -195,14 +215,18 @@ const seek = (event: MouseEvent) => {
     const rect = progressBar.value!.getBoundingClientRect()
     const offsetX = Math.max(0, Math.min(e.clientX - rect.left, rect.width))
     const percent = offsetX / rect.width
-    progressPercent.value = percent * 100 // 实时更新进度百分比
-    audio.value!.currentTime = percent * duration.value
+    progressPercent.value = percent * 100
+    // P2-26: 拖动时只更新 UI，最终位置在 onMouseUp commit
+    pendingSeekFraction.value = percent
   }
 
   updatePosition(event)
 
   const onMouseMove = (e: MouseEvent) => updatePosition(e)
   const onMouseUp = () => {
+    if (audio.value && Number.isFinite(pendingSeekFraction.value)) {
+      audio.value.currentTime = pendingSeekFraction.value * duration.value
+    }
     document.removeEventListener('mousemove', onMouseMove)
     document.removeEventListener('mouseup', onMouseUp)
   }
@@ -212,11 +236,13 @@ const seek = (event: MouseEvent) => {
 }
 
 const segmentStyle = (segment: (typeof voiceSegments)[0]) => {
+  if (!duration.value) return { left: '0%', width: '0%' }
+  const safeEnd = Number.isFinite(segment.end) ? segment.end : duration.value
   const startPercent = (segment.start / duration.value) * 100
-  const endPercent = Math.min((segment.end / duration.value) * 100, 100)
+  const endPercent = Math.min((safeEnd / duration.value) * 100, 100)
   return {
     left: `${startPercent}%`,
-    width: `${endPercent - startPercent}%`,
+    width: `${Math.max(0, endPercent - startPercent)}%`,
     backgroundColor: getSegmentColor(segment.voice),
   }
 }

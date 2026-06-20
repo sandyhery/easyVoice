@@ -23,8 +23,13 @@ const CN_BIG_UNITS = ['', '万', '亿', '兆']
 /**
  * 整数 0-9999 转中文
  * 1024 -> "一千零二十四"
+ *
+ * 不接受负数——负数由 bigIntToCn 在顶层加 "负" 前缀。
  */
 function intToCn(n: number): string {
+  if (n < 0) {
+    throw new Error('intToCn: negative numbers not supported, use bigIntToCn')
+  }
   if (n === 0) return CN_DIGITS[0]
   if (n < 10) return CN_DIGITS[n]
   if (n < 20) return n === 10 ? '十' : '十' + CN_DIGITS[n - 10]
@@ -83,6 +88,8 @@ function bigIntToCn(n: number): string {
  * 0.5  -> "点五"（不是 "零点五"）
  */
 function decimalToCn(decimalStr: string): string {
+  // 0.5 -> "点五"；0.14 -> "点一四"（去前导零，TTS 流畅度更好）
+  // 0.001 -> 这种情况在 numberToCn 顶层会特殊处理为 "零点零零一"
   const trimmed = decimalStr.replace(/^0+/, '') || '0'
   return '点' + trimmed.split('').map(d => CN_DIGITS[Number(d)]).join('')
 }
@@ -109,28 +116,78 @@ export function numberToCn(raw: string): string {
   }
 
   // 科学计数法展开：1.2e5 -> 120000
+  // 用字符串拼接 + BigInt 避免 JS Number 精度丢失（mantissa 整数部分可能 1-3 位）
   const sciMatch = /^(\d+(?:\.\d+)?)[eE]([+-]?\d+)$/.exec(s)
   if (sciMatch) {
     const [, mantissa, expStr] = sciMatch
     const exp = Number(expStr)
     const [intPart, decPart = ''] = mantissa.split('.')
-    const combined = intPart + decPart
-    const decimalShift = decPart.length - exp
-    let expanded: string
-    if (decimalShift >= 0) {
-      expanded = combined.slice(0, combined.length - decimalShift) + '.' + combined.slice(combined.length - decimalShift)
+    const combined = intPart + decPart // mantissa 去掉小数点
+    // 把 combined 视为"无小数点的数字串"，按 exp 平移小数点位置
+    // - exp > 0: 小数点右移 exp 位（不足补 0）
+    // - exp < 0: 小数点左移 |exp| 位（不足补 0，整数部分可能为 '0'）
+    let sInt: string
+    let sDec: string
+    if (exp >= 0) {
+      // 右移：combined 末尾补 (exp - decPart.length) 个 0
+      if (exp >= decPart.length) {
+        sInt = combined + '0'.repeat(exp - decPart.length)
+        sDec = ''
+      } else {
+        // exp < decPart.length：小数点右移 exp 位
+        const splitAt = combined.length - (decPart.length - exp)
+        sInt = combined.slice(0, splitAt)
+        sDec = combined.slice(splitAt)
+      }
     } else {
-      expanded = combined + '0'.repeat(-decimalShift)
+      // 左移：在 combined 开头补 |exp| 个 0，再把小数点放在 combined.length - |exp|
+      const negExp = -exp
+      // 期望：小数点左边 = combined.length - negExp 位（可能为 0 或负数）
+      // 若 < 1，需要在前面再加 0
+      const intLen = combined.length - negExp
+      if (intLen >= 1) {
+        sInt = combined.slice(0, intLen)
+        sDec = combined.slice(intLen)
+      } else {
+        sInt = '0'
+        sDec = '0'.repeat(-intLen) + combined
+      }
     }
-    s = expanded.replace(/\.$/, '')
+    s = sDec ? sInt + '.' + sDec : sInt
+    // 去掉整数部分前导零（保留一位）
+    s = s.replace(/^0+(\d)/, '$1')
+    if (s.startsWith('.')) s = '0' + s
   }
 
   const [intPart, decPart] = s.split('.')
-  let out = prefix + bigIntToCn(Number(intPart || '0'))
+  // 长串数字 (>15 位) 走按位读，避免 Number 精度丢失
+  let intOut: string
+  if ((intPart || '0').length > 15) {
+    intOut = (intPart || '0').split('').map(d => CN_DIGITS[Number(d)]).join('')
+  } else {
+    intOut = bigIntToCn(Number(intPart || '0'))
+  }
+  let out = prefix + intOut
   if (decPart !== undefined) {
-    out += decimalToCn(decPart)
+    // 整数=0 + 小数带前导零：保留前导零的逐位读（0.001 -> "零点零零一"）
+    // 其他情况正常走 decimalToCn（去掉前导零保证流畅度）
+    if (intOut === '零' && /^0+/.test(decPart)) {
+      out += '点' + decPart.split('').map(d => CN_DIGITS[Number(d)]).join('')
+    } else {
+      out += decimalToCn(decPart)
+    }
   }
   return out
+}
+
+/**
+ * 把任意长串纯数字（不限定长度）按位读
+ *  - "12345678901234567890" -> 一二三四五六七八九零一...
+ *  - 与 loneNumberToCn 不同：此函数无视"前后是否有 \w"边界（用于 numberToCn 主路径已截取出纯数字串后）
+ */
+function longStringDigitsToCn(s: string): string {
+  // s 必须是纯数字串（主路径已剥离符号/小数）
+  return s.split('').map(d => CN_DIGITS[Number(d)]).join('')
 }
 
 /**
@@ -208,8 +265,9 @@ function expandAbbrev(text: string): string {
   // 缩写映射按 key 长度倒序排，避免 "St." 在 "St." 与 "Street"（如果有）之间冲突
   const sorted = Object.entries(ABBREV_MAP).sort((a, b) => b[0].length - a[0].length)
   for (const [k, v] of sorted) {
-    // 注意：缩写含 "."，词边界在标点旁不工作。改为：匹配 "<空格/开头>(key)" 即可。
-    const re = new RegExp(`(^|\\s)${k.replace(/\./g, '\\.').replace(/\s/g, '\\s')}`, 'g')
+    // 缩写含 "."，词边界在标点旁不工作。
+    // 接受：开头 / 空白 / 中文标点
+    const re = new RegExp(`(^|[\\s，。！？、：；])(${k.replace(/\./g, '\\.').replace(/\s/g, '\\s')})`, 'g')
     out = out.replace(re, (_, prefix) => prefix + v)
   }
   return out
@@ -253,7 +311,12 @@ const UNIT_TAILS = [
 
 function numberWithUnitToCn(raw: string): string {
   // 简单匹配：数字 + 单位（紧贴、无空格）
-  const re = new RegExp(`(-?\\d+(?:\\.\\d+)?)(${UNIT_TAILS.map(u => u[0].replace(/[°℃]/g, '\\$&')).join('|')})\\b`, 'g')
+  // 用标准 regex escape 防御未来加入特殊字符的单位
+  const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const re = new RegExp(
+    `(-?\\d+(?:\\.\\d+)?)(${UNIT_TAILS.map(u => escapeRe(u[0])).join('|')})(?=$|[\\s，。、;])`,
+    'g'
+  )
   return raw.replace(re, (_, num, unit) => {
     const mapped = UNIT_TAILS.find(u => u[0] === unit)?.[1] || unit
     return numberToCn(num) + mapped
@@ -262,19 +325,21 @@ function numberWithUnitToCn(raw: string): string {
 
 /**
  * 阿拉伯数字单独成串（且不在 URL/邮箱/百分号/货币/单位里）→ 中文读法
- * 兜底规则，比较保守：要求数字串前后是中文/空白/标点，且长度 1-16
+ * 兜底规则，比较保守：要求数字串前后是中文/空白/标点。
  *
- * 保号语义：当原始串带前导零（如 "007"），逐位读（避免 TTS 读成 "七"）。
+ * 保号语义：当原始串带前导零（如 "007"）或超长（>15 位），逐位读，避免 TTS 读错/精度丢失。
  */
 function loneNumberToCn(raw: string): string {
-  const re = /(?<![\w./@%-])(-?\d{1,16}(?:\.\d{1,8})?)(?![\w/%°℃A-Za-z])/g
+  // 支持纯数字 + 小数 + 科学计数法（数字部分最多 30 位）
+  const re = /(?<![\w./@%-])(-?\d{1,30}(?:\.\d{1,15})?(?:[eE][+-]?\d{1,4})?)(?![\w/%°℃A-Za-z])/g
   return raw.replace(re, (fullMatch) => {
-    // 含前导零：按位读，"007" -> "零零七"
-    if (/^-?0\d/.test(fullMatch)) {
-      const sign = fullMatch.startsWith('-') ? '负' : ''
-      const body = fullMatch.replace(/^-/, '')
+    const sign = fullMatch.startsWith('-') ? '负' : ''
+    const body = fullMatch.replace(/^-/, '')
+    // 含前导零 或 整数部分 > 15 位：按位读（避免精度丢失/保号）
+    // 注意：科学计数法走 numberToCn 走的是 bigIntToCn，不需要按位读
+    if (/^-?0\d/.test(fullMatch) && !/[eE]/.test(body)) {
       const [intP, decP] = body.split('.')
-      let out = sign + intP.split('').map(d => CN_DIGITS[Number(d)]).join('')
+      let out = sign + (intP || '0').split('').map(d => CN_DIGITS[Number(d)]).join('')
       if (decP !== undefined) out += '点' + decP.split('').map(d => CN_DIGITS[Number(d)]).join('')
       return out
     }
@@ -292,9 +357,12 @@ export function normalizeForTTS(text: string): string {
   let s = text
   s = maskUrlOrEmail(s)
   s = percentToCn(s)
-  // 百分号已替换；剩下的货币
-  // 用一个不冲突的正则扫一遍
-  s = s.replace(/[¥￥$€£]-?\d+(?:\.\d+)?|\d+(?:\.\d+)?\s?(?:元|美元|欧元|英镑|日元|块|毛)/g, (m) => currencyToCn(m))
+  // 百分号已替换；剩下的货币。
+  // 货币前缀必须是 1-9 开头（避免 "007元" 错判为 "0元"）：007 应走 loneNumberToCn 的保号分支
+  s = s.replace(
+    /[¥￥$€£][1-9]\d*(?:\.\d+)?|[1-9]\d*(?:\.\d+)?\s?(?:元|美元|欧元|英镑|日元|块|毛)/g,
+    (m) => currencyToCn(m)
+  )
   s = numberWithUnitToCn(s)
   s = loneNumberToCn(s)
   s = expandAbbrev(s)

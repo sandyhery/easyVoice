@@ -2,15 +2,27 @@ interface Task {
   (): Promise<any>
 }
 
+export interface MapLimitControllerOptions {
+  /**
+   * 可选：每个 task 启动前/中检查是否已取消
+   * 返回 true 时 controller 立即停止派发新 task，正在运行的 task 也会被 cancel
+   */
+  isCancelled?: () => boolean
+}
+
 export class MapLimitController {
   private cancelled: boolean = false
   private runningTasks: Set<Promise<any>> = new Set()
+  private isCancelledCheck: () => boolean
 
   constructor(
     private tasks: Task[],
     private concurrency: number = 3,
-    private callback: () => void = () => {}
-  ) {}
+    private callback: () => void = () => {},
+    options: MapLimitControllerOptions = {}
+  ) {
+    this.isCancelledCheck = options.isCancelled || (() => this.cancelled)
+  }
 
   cancel(): void {
     this.cancelled = true
@@ -38,7 +50,7 @@ export class MapLimitController {
       }
 
       const runNext = () => {
-        while (!this.cancelled && running < this.concurrency && index < this.tasks.length) {
+        while (!this.isCancelledCheck() && running < this.concurrency && index < this.tasks.length) {
           const currentIndex = index++
           running++
 
@@ -47,12 +59,12 @@ export class MapLimitController {
 
           taskPromise
             .then((result) => {
-              if (!this.cancelled) {
+              if (!this.isCancelledCheck()) {
                 results[currentIndex] = { success: true, value: result }
               }
             })
             .catch((error) => {
-              if (!this.cancelled) {
+              if (!this.isCancelledCheck()) {
                 results[currentIndex] = {
                   success: false,
                   index: currentIndex,
@@ -67,7 +79,7 @@ export class MapLimitController {
 
               if (completed === originalLength) {
                 complete()
-              } else if (!this.cancelled) {
+              } else if (!this.isCancelledCheck()) {
                 runNext()
               } else if (running === 0) {
                 complete()

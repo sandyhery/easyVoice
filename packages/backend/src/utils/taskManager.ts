@@ -126,8 +126,10 @@ class TaskManager {
     task.status = 'cancelled'
     task.message = 'cancelled by user'
     task.updatedAt = new Date()
+    task.finishedAt = new Date()
     task.cancel?.()
     logger.info(`Task ${taskId} cancelled`)
+    this.scheduleIdleUnload()
     return task
   }
 
@@ -171,7 +173,9 @@ class TaskManager {
     findTask.message = message
     findTask.code = code
     findTask.updatedAt = new Date()
+    findTask.finishedAt = new Date()
     this.tasks.set(taskId, findTask)
+    this.scheduleIdleUnload()
     return true
   }
   updateProgress(taskId: string, progress: number): Task | undefined {

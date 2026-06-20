@@ -31,6 +31,10 @@ export async function createTaskStream(req: Request, res: Response, next: NextFu
     const formattedBody = formatEdgeBody(req.body)
     const task = taskManager.createTask(formattedBody)
     task.context = { req, res, body: req.body }
+    // 注册 cancel 回调：cancelTask 调用时会让流式循环跳出
+    task.cancel = () => {
+      task.cancelled = true
+    }
     logger.info(`Generated stream task ID: ${task.id}`)
     generateTTSStream(formattedBody, task, createOpenAIClient(req.openaiOverrides))
   } catch (error) {
@@ -54,6 +58,10 @@ export async function generateJson(req: Request, res: Response, next: NextFuncti
 
     const segment: Segment = { id: generateId(voice, text), text }
     task.context = { req, res, segment, body: req.body }
+    // 同样注册 cancel 回调
+    task.cancel = () => {
+      task.cancelled = true
+    }
     logger.info(`Generated stream task ID: ${task.id}`)
     generateTTSStreamJson(formatedBody, task)
   } catch (error) {
@@ -125,10 +133,18 @@ export async function cancelTask(req: Request, res: Response, next: NextFunction
       res.status(404).json({ code: 404, message: 'task not found', success: false })
       return
     }
+    // 关闭 task 关联的 HTTP 响应流（如果有）。用 targetRes 避免与外层 res 遮蔽。
     try {
-      const res = task.context?.res
-      if (res && !res.writableEnded) {
-        res.end()
+      const targetRes = task.context?.res
+      if (targetRes && !targetRes.writableEnded) {
+        // setImmediate 延后到下一个 tick，确保流管道先收到 close 事件
+        setImmediate(() => {
+          try {
+            targetRes.end()
+          } catch (e) {
+            logger.warn('cancelTask deferred end error', e)
+          }
+        })
       }
     } catch (e) {
       logger.warn('cancelTask close res error', e)

@@ -1,5 +1,6 @@
 import { TTSEngine, TtsOptions } from '../types'
 import { fetcher } from '../../utils/request'
+import { logger } from '../../utils/logger'
 import { Readable } from 'stream'
 
 const OPENAI_VOICES = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'] as const
@@ -27,7 +28,20 @@ export class OpenAITtsEngine implements TTSEngine {
       voice = 'alloy',
       format = 'mp3',
       outputType = 'buffer',
+      pitch,
+      rate,
+      volume,
+      style,
     } = options
+
+    // 显式 warn 静默丢弃的参数
+    if (pitch !== undefined) logger.warn(`OpenAI engine ignores pitch=${pitch}`)
+    if (rate !== undefined && typeof rate === 'string') {
+      // rate 字符串已在 dispatcher 转成 speed；这里只 warn 避免误导
+      logger.warn(`OpenAI engine: rate as string is converted to speed=${speed}`)
+    }
+    if (volume !== undefined) logger.warn(`OpenAI engine ignores volume=${volume}`)
+    if (style !== undefined) logger.warn(`OpenAI engine ignores style=${style}`)
 
     if (typeof text !== 'string' || text.length === 0) {
       throw new Error('Input text is required.')
@@ -59,8 +73,7 @@ export class OpenAITtsEngine implements TTSEngine {
           voice,
           speed,
           response_format: format,
-          // OpenAI 支持流式输出
-          ...(wantStream ? { stream: true } : {}),
+          // 流式由 responseType 控，不再塞 body stream:true（避免双重含义）
         },
         {
           headers: {
