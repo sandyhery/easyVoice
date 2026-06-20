@@ -2,7 +2,7 @@ import path, { resolve } from 'path'
 import { Response } from 'express'
 import fs, { readdir } from 'fs/promises'
 import ffmpeg from 'fluent-ffmpeg'
-import { AUDIO_DIR, STATIC_DOMAIN, EDGE_API_LIMIT } from '../config'
+import { AUDIO_DIR, audioUrl, EDGE_API_LIMIT, MAX_AUDIO_FILE_SIZE, SRT_WAIT_MAX_MS } from '../config'
 import { logger } from '../utils/logger'
 import { getPrompt } from '../llm/prompt/generateSegment'
 import {
@@ -11,11 +11,14 @@ import {
   generateId,
   getLangConfig,
   readJson,
+  readJsonOrEmpty,
   streamToResponse,
   fileExist,
+  waitForSrtSource,
 } from '../utils'
-import { openai } from '../utils/openai'
+import { openai, type OpenAIClient } from '../utils/openai'
 import { splitText } from './text.service'
+import { normalizeForTTS } from './normalize.service'
 import { generateSingleVoiceStream, generateSrt } from './edge-tts.service'
 import { EdgeSchema } from '../schema/generate'
 import { MapLimitController } from '../controllers/concurrency.controller'
@@ -39,8 +42,9 @@ enum ErrorMessages {
 /**
  * 流式生成文本转语音 (TTS) 的音频和字幕
  */
-export async function generateTTSStream(params: Required<EdgeSchema>, task: Task) {
-  const { text, pitch, voice, rate, volume, useLLM } = params
+export async function generateTTSStream(params: Required<EdgeSchema>, task: Task, openaiClient?: OpenAIClient) {
+  const { pitch, voice, rate, volume, useLLM } = params
+  const text = normalizeForTTS((params.text || '').trim())
   const segment: Segment = { id: generateId(useLLM ? 'aigen-' : voice, text), text }
   const { lang, voiceList } = await getLangConfig(segment.text)
   logger.debug(`Language detected lang: `, lang)
@@ -72,7 +76,7 @@ export async function generateTTSStream(params: Required<EdgeSchema>, task: Task
   }
 
   if (useLLM) {
-    generateWithLLMStream(task)
+    generateWithLLMStream(task, openaiClient)
   } else {
     generateWithoutLLMStream({ ...params, output: segment.id }, task)
   }
@@ -90,10 +94,10 @@ export async function generateTTSStreamJson(formatedBody: Required<EdgeSchema>[]
 /**
  * 使用 LLM 生成 TTS
  */
-async function generateWithLLMStream(task: Task) {
+async function generateWithLLMStream(task: Task, openaiClient?: OpenAIClient) {
   const { segment, voiceList, lang, res } = task.context as Required<NonNullable<Task['context']>>
   const { text, id } = segment
-  const { length, segments } = splitText(text.trim())
+  const { length, segments } = splitText(text, undefined, { normalize: false })
   const formatLlmSegments = (llmSegments: any) =>
     llmSegments
       .filter((segment: any) => segment.text)
@@ -104,7 +108,7 @@ async function generateWithLLMStream(task: Task) {
   if (length <= 1) {
     const prompt = getPrompt(lang, voiceList, segments[0])
     logger.debug(`Prompt for LLM: ${prompt}`)
-    const llmResponse = await fetchLLMSegment(prompt)
+    const llmResponse = await fetchLLMSegment(prompt, openaiClient ?? openai)
     let llmSegments = llmResponse?.result || llmResponse?.segments || []
     if (!Array.isArray(llmSegments)) {
       throw new Error(
@@ -128,7 +132,7 @@ async function generateWithLLMStream(task: Task) {
       count++
       const prompt = getPrompt(lang, voiceList, seg)
       logger.debug(`Prompt for LLM: ${prompt}`)
-      const llmResponse = await fetchLLMSegment(prompt)
+      const llmResponse = await fetchLLMSegment(prompt, openaiClient ?? openai)
       let llmSegments = llmResponse?.result || llmResponse?.segments || []
       if (!Array.isArray(llmSegments)) {
         throw new Error(
@@ -149,9 +153,12 @@ async function generateWithLLMStream(task: Task) {
       logger.info(`Progress: ${getProgress()}%`)
     }
     outputStream.end()
-    setTimeout(() => {
-      handleSrt(output)
-    }, 200)
+    try {
+      await waitForSrtSource(output)
+      await handleSrt(output)
+    } catch (err) {
+      logger.warn(`handleSrt failed for ${output}: ${(err as Error).message}`)
+    }
   }
 }
 const buildFinal = async (finalSegments: TTSResult[], id: string) => {
@@ -159,7 +166,7 @@ const buildFinal = async (finalSegments: TTSResult[], id: string) => {
     finalSegments.map((file) => {
       const base = path.basename(file.audio)
       const jsonPath = path.resolve(AUDIO_DIR, base.replace('.mp3', ''), 'all_splits.mp3.json')
-      return readJson<SubtitleFile>(jsonPath)
+      return readJsonOrEmpty<SubtitleFile>(jsonPath)
     })
   )
 
@@ -175,15 +182,15 @@ const buildFinal = async (finalSegments: TTSResult[], id: string) => {
   const outputFile = path.resolve(AUDIO_DIR, id)
   await concatDirAudio({ inputDir: finalDir, fileList, outputFile })
   return {
-    audio: `${STATIC_DOMAIN}/${id}`,
-    srt: `${STATIC_DOMAIN}/${id.replace('.mp3', '.srt')}`,
+    audio: `${audioUrl(id)}`,
+    srt: `${audioUrl(id.replace('.mp3', '.srt'))}`,
   }
 }
 
 async function generateWithoutLLMStream(params: TTSParams, task: Task) {
   const { segment } = task.context as Required<NonNullable<Task['context']>>
   const { text } = segment
-  const { length, segments } = splitText(text)
+  const { length, segments } = splitText(text, undefined, { normalize: false })
   logger.info(`splitText length: ${length} `)
   if (length <= 1) {
     buildSegment(params, task)
@@ -217,9 +224,9 @@ async function buildSegment(params: TTSParams, task: Task, dir: string = '') {
     onEnd: () => {
       task?.endTask?.(task.id)
       logger.info(`Streaming ${task.id} finished`)
-      setTimeout(() => {
-        handleSrt(output)
-      }, 200)
+      waitForSrtSource(output)
+        .then(() => handleSrt(output))
+        .catch((err) => logger.warn(`handleSrt failed: ${(err as Error).message}`))
     },
   })
 }
@@ -298,7 +305,7 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
     return void res.status(400).end('No segments provided')
   }
 
-  const MAX_FILE_SIZE = 500 * 1024 * 1024 // 500MB
+  const MAX_FILE_SIZE = MAX_AUDIO_FILE_SIZE
   const progress = () => Number(((completedSegments / totalSegments) * 100).toFixed(2))
 
   // 检查断点续传
@@ -317,6 +324,16 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
   let currentFileSize = 0
   let currentOutputStream: PassThrough | null = null
   let currentWriteStream: ReturnType<typeof createWriteStream> | null = null
+
+  // 如果有正在进行的文件，获取其大小
+  if (currentFileIndex > 0) {
+    const currentFilePath = path.resolve(AUDIO_DIR, `${outputId}_${currentFileIndex}.mp3`)
+    if (await fileExist(currentFilePath)) {
+      const stats = await fs.stat(currentFilePath)
+      currentFileSize = stats.size
+      logger.info(`Resuming file ${currentFileIndex}, current size: ${(currentFileSize / 1024 / 1024).toFixed(2)}MB`)
+    }
+  }
 
   const startNewFile = async () => {
     if (currentWriteStream) {
@@ -371,10 +388,16 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
   }
 
   const processSegment = async (index: number, maxRetries = 3): Promise<void> => {
+    // 协作式取消：让长循环能跳出
+    if (task.cancelled) {
+      logger.info(`Task ${task.id} cancelled, stopping at segment ${index}`)
+      currentOutputStream?.end()
+      return
+    }
     if (index >= totalSegments) {
       currentOutputStream?.end()
       task?.endTask?.(task.id)
-      const audioUrls = files.map((_, i) => `${STATIC_DOMAIN}/${outputId}_${i + 1}.mp3`)
+      const audioUrls = files.map((_, i) => `${audioUrl(`${outputId}_${i + 1}.mp3`)}`)
       logger.info(`Generated ${files.length} files: ${audioUrls.join(', ')}`)
       deleteCheckpoint(outputId)
       return
@@ -417,10 +440,14 @@ async function buildSegmentList(segments: BuildSegment[], task: Task): Promise<v
       const audioStream = await generateWithRetry()
       audioStream.pipe(currentOutputStream!, { end: false })
       await new Promise((resolve) => audioStream.on('end', resolve))
-      currentFileSize += 100 * 1024 // 估算每次增加约 100KB
+
+      // 获取实际文件大小
+      const currentFilePath = path.resolve(AUDIO_DIR, `${outputId}_${currentFileIndex}.mp3`)
+      const stats = await fs.stat(currentFilePath)
+      currentFileSize = stats.size
 
       if (currentFileSize >= MAX_FILE_SIZE && index < totalSegments - 1) {
-        logger.info(`File ${currentFileIndex} reached size limit, starting new file`)
+        logger.info(`File ${currentFileIndex} reached size limit (${(currentFileSize / 1024 / 1024).toFixed(2)}MB), starting new file`)
         await startNewFile()
       }
 
@@ -481,8 +508,8 @@ function validateLangAndVoice(lang: string, voice: string, res: Response): boole
 /**
  * 从 LLM 获取分段参数
  */
-async function fetchLLMSegment(prompt: string): Promise<any> {
-  const response = await openai.createChatCompletion({
+async function fetchLLMSegment(prompt: string, client: OpenAIClient = openai): Promise<any> {
+  const response = await client.createChatCompletion({
     messages: [
       {
         role: 'system',
@@ -566,7 +593,7 @@ export async function concatDirSrt({
   if (!_jsonFiles.length) throw new Error('No JSON files found for subtitles')
 
   const subtitleFiles: SubtitleFiles = await Promise.all(
-    _jsonFiles.map((file) => readJson<SubtitleFile>(file))
+    _jsonFiles.map((file) => readJsonOrEmpty<SubtitleFile>(file))
   )
   const mergedJson = mergeSubtitleFiles(subtitleFiles)
   const tempJsonPath = path.resolve(inputDir, 'all_splits.mp3.json')

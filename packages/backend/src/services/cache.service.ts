@@ -90,6 +90,12 @@ class CacheService {
   async cleanExpired(): Promise<void> {
     await this.storage.cleanExpired()
   }
+
+  // 主动删除
+  async delete(str: string): Promise<void> {
+    const key = this.generateKey(str)
+    await this.storage.delete(key)
+  }
 }
 
 export default CacheService

@@ -3,6 +3,7 @@ import { memoryUsage } from 'process'
 import { Request, Response, NextFunction } from 'express'
 import { formatFileSize } from '.'
 import { logger } from './logger'
+import { MAX_TASKS, TASK_IDLE_UNLOAD_MS } from '../config'
 
 interface Options {
   prefix?: string
@@ -10,6 +11,8 @@ interface Options {
 }
 interface TaskManagerOptions {
   length?: number
+  // idleUnloadMs: 任务完成后超过此毫秒数，从内存中卸载（用于长任务场景释放内存）
+  idleUnloadMs?: number
 }
 export interface Task {
   id: string
@@ -21,8 +24,12 @@ export interface Task {
   result: any
   createdAt: Date
   updatedAt?: Date
+  finishedAt?: Date
   updateProgress?: (taskId: string, progress: number) => Task | undefined
   endTask?: (taskId: string) => void
+  // 取消回调：让流式生成循环能优雅退出
+  cancel?: () => void
+  cancelled?: boolean
   context?: {
     req?: Request
     res?: Response
@@ -36,9 +43,12 @@ export interface Task {
 class TaskManager {
   tasks: Map<string, Task>
   MAX_TASKS: number
+  idleUnloadMs: number
+  idleUnloadTimer?: NodeJS.Timeout
   constructor(options?: TaskManagerOptions) {
     this.tasks = new Map()
-    this.MAX_TASKS = options?.length || 10
+    this.MAX_TASKS = options?.length || MAX_TASKS
+    this.idleUnloadMs = options?.idleUnloadMs ?? TASK_IDLE_UNLOAD_MS
   }
 
   generateTaskId(fields: any, options: Options = {}) {
@@ -93,9 +103,58 @@ class TaskManager {
     task.status = 'completed'
     task.progress = 100
     task.updatedAt = new Date()
+    task.finishedAt = new Date()
     this.tasks.set(taskId, task)
     logger.info(`Task ${taskId} completed`)
+    this.scheduleIdleUnload()
     return task
+  }
+
+  /**
+   * 取消任务：
+   * - 把状态置为 cancelled
+   * - 调用 cancel 回调，让生成循环能跳出
+   * - 不会删 checkpoint（用户可 resume）
+   */
+  cancelTask(taskId: string): Task | null {
+    const task = this.tasks.get(taskId)
+    if (!task) return null
+    if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
+      return task
+    }
+    task.cancelled = true
+    task.status = 'cancelled'
+    task.message = 'cancelled by user'
+    task.updatedAt = new Date()
+    task.cancel?.()
+    logger.info(`Task ${taskId} cancelled`)
+    return task
+  }
+
+  /**
+   * idle unload：扫描 finished/failed/cancelled 任务，超过 idleUnloadMs 的从内存中删除
+   * checkpoint 文件还在硬盘上，用户可恢复
+   */
+  private scheduleIdleUnload() {
+    if (this.idleUnloadTimer) return
+    this.idleUnloadTimer = setTimeout(() => {
+      this.idleUnloadTimer = undefined
+      const now = Date.now()
+      let removed = 0
+      for (const [id, task] of this.tasks) {
+        const endTime = task.finishedAt || task.updatedAt || task.createdAt
+        const idle = now - new Date(endTime).getTime()
+        const isDone =
+          task.status === 'completed' ||
+          task.status === 'failed' ||
+          task.status === 'cancelled'
+        if (isDone && idle >= this.idleUnloadMs) {
+          this.tasks.delete(id)
+          removed++
+        }
+      }
+      if (removed) logger.info(`Idle-unloaded ${removed} finished tasks`)
+    }, 30_000) // 每 30 秒扫一次
   }
   isTaskPending(taskId: string) {
     return this.getTask(taskId)?.status === 'pending' || false

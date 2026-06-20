@@ -103,6 +103,9 @@ export const createTaskStream = async (data: TaskRequest) => {
   )
   const ttsType = response.headers['x-generate-tts-type']
   const contentType = response.headers['content-type']
+  const taskId = response.headers['access-control-expose-headers-generate-tts-id']
+    || response.headers['x-generate-tts-id']
+    || ''
   if (
     response.status !== 200 ||
     ttsType === 'application/json' ||
@@ -110,9 +113,62 @@ export const createTaskStream = async (data: TaskRequest) => {
   ) {
     const text = await new Response(response.data as any).text()
     const responseData = JSON.parse(text)
-    return responseData
+    return { data: responseData, taskId }
   }
-  return response.data as ReadableStream
+  return { data: response.data as ReadableStream, taskId }
 }
 
 export const downloadFile = (file: string) => `${api.defaults.baseURL}/download/${file}`
+
+// ====== 新增：引擎列表 ======
+export interface EngineInfo {
+  name: string
+}
+export const listEngines = async () => {
+  const response = await api.get<ResponseWrapper<EngineInfo[]>>('/engines/list')
+  if (response.data?.code !== 200 || !response.data?.success) {
+    throw new Error(response.data?.message || '获取引擎失败')
+  }
+  return response.data
+}
+
+// ====== 新增：任务取消 ======
+export const cancelTask = async (taskId: string) => {
+  const response = await api.post<ResponseWrapper<{ id: string; status: string }>>(
+    `/cancel/${taskId}`
+  )
+  return response.data
+}
+
+// ====== 新增：声音预设（Voice Profile） ======
+export interface VoiceProfile {
+  id: string
+  name: string
+  voice: string
+  rate?: string
+  pitch?: string
+  volume?: string
+  style?: string
+  engine?: string
+  description?: string
+  createdAt: string
+  updatedAt: string
+}
+export const listProfiles = async () => {
+  const response = await api.get<ResponseWrapper<VoiceProfile[]>>('/profile')
+  return response.data
+}
+export const createProfile = async (
+  data: Omit<VoiceProfile, 'id' | 'createdAt' | 'updatedAt'>
+) => {
+  const response = await api.post<ResponseWrapper<VoiceProfile>>('/profile', data)
+  return response.data
+}
+export const updateProfile = async (id: string, data: Partial<VoiceProfile>) => {
+  const response = await api.put<ResponseWrapper<VoiceProfile>>(`/profile/${id}`, data)
+  return response.data
+}
+export const deleteProfile = async (id: string) => {
+  const response = await api.delete<ResponseWrapper<null>>(`/profile/${id}`)
+  return response.data
+}

@@ -37,8 +37,9 @@ export class KokoroTtsEngine implements TTSEngine {
 
   // 修改 synthesize 方法，返回 Buffer 或 Readable
   async synthesize(text: string, options: ExtendedTtsOptions): Promise<Buffer | Readable> {
+    // initialize 由 pluginManager 启动时统一调用过，这里不再重复 health-check
     if (!this.initialized) {
-      await this.initialize()
+      throw new Error('Kokoro TTS engine not initialized. Did pluginManager.initializeEngines() run?')
     }
 
     const {

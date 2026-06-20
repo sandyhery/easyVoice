@@ -1,12 +1,15 @@
 import { Jieba } from '@node-rs/jieba'
+import { normalizeForTTS } from './normalize.service'
+import { TEXT_SPLIT_TARGET_LENGTH } from '../config'
 
 const jieba = new Jieba()
-const TARGET_LENGTH = 500
-export function splitText(text: string, targetLength = TARGET_LENGTH) {
-  if (text.length < targetLength) return { length: 1, segments: [text] }
+export function splitText(text: string, targetLength = TEXT_SPLIT_TARGET_LENGTH, opts: { normalize?: boolean } = {}) {
+  // 归一化开关默认开启；调用方可传 normalize=false 跳过（例如底层测试）
+  const normalized = opts.normalize === false ? text : normalizeForTTS(text)
+  if (normalized.length < targetLength) return { length: 1, segments: [normalized] }
   const segments: string[] = []
   let currentSegment = ''
-  let sentences = text.split(/([。！？.!?])/)
+  const sentences = normalized.split(/([。！？.!?])/)
 
   for (let i = 0; i < sentences.length; i += 2) {
     const sentence = (sentences[i] || '') + (sentences[i + 1] || '')

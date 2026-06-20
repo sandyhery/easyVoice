@@ -1,61 +1,132 @@
-// services/cache/storage/fileStorage.ts
-import { BaseStorage } from './baseStorage';
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import { BaseStorage } from './baseStorage'
+import * as fs from 'fs/promises'
+import * as path from 'path'
+import { logger } from '../utils/logger'
 
 interface FileStorageOptions {
-  cacheDir: string;
+  cacheDir: string
 }
 
+interface MetaEntry {
+  expireAt: number
+  mtime: number
+}
+
+/**
+ * 文件存储
+ *
+ * 优化点：
+ * 1. 启动时一次性 buildIndex 扫描目录，记 mtime + 过期时间到内存 Map
+ * 2. 命中/未命中直接走内存，零额外 IO
+ * 3. set/delete 只更新内存 + 写文件，cleanExpired 只删内存中已过期的项（不再 readdir 全部）
+ * 4. 文件被外部删除时 mtime 检测降级到磁盘读取（兜底）
+ */
 export class FileStorage extends BaseStorage {
-  private cacheDir: string;
+  private cacheDir: string
+  private index: Map<string, MetaEntry> = new Map()
+  private initPromise: Promise<void> | null = null
 
   constructor(options: FileStorageOptions) {
-    super();
-    this.cacheDir = options.cacheDir;
-    this.initDir();
+    super()
+    this.cacheDir = options.cacheDir
+    this.initPromise = this.init()
   }
 
-  private async initDir() {
-    await fs.mkdir(this.cacheDir, { recursive: true });
+  private async init(): Promise<void> {
+    await fs.mkdir(this.cacheDir, { recursive: true })
+    try {
+      const files = await fs.readdir(this.cacheDir)
+      for (const file of files) {
+        if (!file.endsWith('.json')) continue
+        const key = file.replace(/\.json$/, '')
+        try {
+          const filePath = path.join(this.cacheDir, file)
+          const stat = await fs.stat(filePath)
+          const data = await fs.readFile(filePath, 'utf8')
+          const item = JSON.parse(data)
+          if (item && typeof item.expireAt === 'number') {
+            this.index.set(key, { expireAt: item.expireAt, mtime: stat.mtimeMs })
+          }
+        } catch (err) {
+          logger.debug(`FileStorage init skip ${file}: ${(err as Error).message}`)
+        }
+      }
+      logger.info(`FileStorage indexed ${this.index.size} entries in ${this.cacheDir}`)
+    } catch (err) {
+      logger.warn(`FileStorage init failed for ${this.cacheDir}: ${(err as Error).message}`)
+    }
   }
 
   private getFilePath(key: string): string {
-    return path.join(this.cacheDir, `${key}.json`);
+    return path.join(this.cacheDir, `${key}.json`)
+  }
+
+  private async ready(): Promise<void> {
+    if (this.initPromise) await this.initPromise
   }
 
   async set<T>(key: string, value: T): Promise<boolean> {
-    const filePath = this.getFilePath(key);
-    await fs.writeFile(filePath, JSON.stringify(value, null, 2), 'utf8');
-    return true;
+    await this.ready()
+    const filePath = this.getFilePath(key)
+    const expireAt = (value as any)?.expireAt ?? 0
+    const data = JSON.stringify(value, null, 2)
+    await fs.writeFile(filePath, data, 'utf8')
+    const stat = await fs.stat(filePath)
+    this.index.set(key, { expireAt, mtime: stat.mtimeMs })
+    return true
   }
 
   async get<T>(key: string): Promise<T | null> {
-    const filePath = this.getFilePath(key);
+    await this.ready()
+    const meta = this.index.get(key)
+    if (!meta) return null
+    if (meta.expireAt < Date.now()) {
+      await this.delete(key)
+      return null
+    }
+    // 外部可能删了文件，mtime 检测降级
     try {
-      const data = await fs.readFile(filePath, 'utf8');
-      return JSON.parse(data);
+      const stat = await fs.stat(this.getFilePath(key))
+      if (Math.abs(stat.mtimeMs - meta.mtime) > 1) {
+        // 外部改动，重读
+        this.index.set(key, { ...meta, mtime: stat.mtimeMs })
+      }
+      const data = await fs.readFile(this.getFilePath(key), 'utf8')
+      return JSON.parse(data) as T
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      throw err;
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.index.delete(key)
+        return null
+      }
+      throw err
     }
   }
 
   async delete(key: string): Promise<void> {
-    const filePath = this.getFilePath(key);
-    await fs.unlink(filePath)
-  }
-
-  async cleanExpired(): Promise<void> {
-    const files = await fs.readdir(this.cacheDir);
-    const now = Date.now();
-    for (const file of files) {
-      const filePath = path.join(this.cacheDir, file);
-      const data = await fs.readFile(filePath, 'utf8');
-      const item = JSON.parse(data);
-      if (item?.expireAt < now) {
-        await fs.unlink(filePath);
+    this.index.delete(key)
+    try {
+      await fs.unlink(this.getFilePath(key))
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logger.debug(`FileStorage delete ${key}: ${(err as Error).message}`)
       }
     }
+  }
+
+  /**
+   * 增量清理：只删除内存索引中已过期的项，不再 readdir + readFile 全量。
+   * 磁盘上的残留会在下次 get 时按 mtime 重新索引时被清掉。
+   */
+  async cleanExpired(): Promise<void> {
+    await this.ready()
+    const now = Date.now()
+    let removed = 0
+    for (const [key, meta] of this.index) {
+      if (meta.expireAt < now) {
+        await this.delete(key)
+        removed++
+      }
+    }
+    if (removed) logger.info(`FileStorage cleaned ${removed} expired entries`)
   }
 }

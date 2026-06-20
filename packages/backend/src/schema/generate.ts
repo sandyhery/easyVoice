@@ -2,7 +2,6 @@ import { config, DIRECT_GEN_LIMIT, LIMIT_TEXT_LENGTH, LIMIT_TEXT_LENGTH_ERROR_ME
 import { NextFunction, Response, Request } from 'express'
 import { z } from 'zod'
 import { logger } from '../utils/logger'
-import { openai } from '../utils/openai'
 
 export const edgeSchema = z.object({
   text: z.string().trim().min(5, { message: '文本最少 5 字符！' }),
@@ -11,6 +10,7 @@ export const edgeSchema = z.object({
   volume: z.string().optional(),
   rate: z.string().optional(),
   useLLM: z.boolean().default(false),
+  engine: z.string().optional(),
 })
 
 export const llmSchema = z.object({
@@ -42,22 +42,14 @@ const jsonSchema = z.object({
   data: z.array(dataItemSchema).min(1, '数据数组不能为空'),
 })
 
-// 导出类型（可选）
 export type DataItem = z.infer<typeof dataItemSchema>
 export type JsonSchema = z.infer<typeof jsonSchema>
-
 export type LlmSchema = z.infer<typeof llmSchema>
-
 export type EdgeSchema = z.infer<typeof edgeSchema>
 
 const commonValidate = (req: Request, res: Response, next: NextFunction, schema: z.ZodTypeAny) => {
   try {
     schema.parse(req.body)
-    openai.config({
-      apiKey: req.body.openaiKey,
-      baseURL: req.body.openaiBaseUrl,
-      model: req.body.openaiModel,
-    })
     if (LIMIT_TEXT_LENGTH) {
       const allTxt = req.body.text
       if (allTxt?.length > LIMIT_TEXT_LENGTH) {
@@ -95,6 +87,7 @@ export const validateEdge = (req: Request, res: Response, next: NextFunction) =>
   }
   commonValidate(req, res, next, edgeSchema)
 }
+
 export const validateLLM = (req: Request, res: Response, next: NextFunction) => {
   const { useLLM, text } = req.body
   const isGenerate = req.url.includes('/generate')
@@ -107,19 +100,15 @@ export const validateLLM = (req: Request, res: Response, next: NextFunction) => 
     })
     return
   }
-  // read from env if not provided in request body
+  // 优先用请求体里的配置，回退到环境变量
   const { OPENAI_BASE_URL, OPENAI_API_KEY, MODEL_NAME } = process.env
-  if (!req.body?.openaiBaseUrl && OPENAI_BASE_URL) {
-    req.body.openaiBaseUrl = OPENAI_BASE_URL
-  }
-  if (!req.body?.openaiKey && OPENAI_API_KEY) {
-    req.body.openaiKey = OPENAI_API_KEY
-  }
-  if (!req.body?.openaiModel && MODEL_NAME) {
-    req.body.openaiModel = MODEL_NAME
-  }
+  const baseURL = req.body?.openaiBaseUrl || OPENAI_BASE_URL
+  const apiKey = req.body?.openaiKey || OPENAI_API_KEY
+  const model = req.body?.openaiModel || MODEL_NAME
+  req.openaiOverrides = { apiKey, baseURL, model }
   commonValidate(req, res, next, llmSchema)
 }
+
 export const validateJson = (req: Request, res: Response, next: NextFunction) => {
   try {
     jsonSchema.parse(req.body)

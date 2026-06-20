@@ -5,55 +5,45 @@ import taskManager from '../utils/taskManager'
 import { EdgeSchema } from '../schema/generate'
 import { generateTTSStream, generateTTSStreamJson } from '../services/tts.stream.service'
 import { generateId, streamWithLimit, readJson, fileExist } from '../utils'
-import { AUDIO_DIR, STATIC_DOMAIN } from '../config'
-function formatBody({ text, pitch, voice, volume, rate, useLLM }: EdgeSchema) {
-  const positivePercent = (value: string | undefined) => {
-    if (value === '0%' || value === '0' || value === undefined || value === '') return '+0%'
-    return value
-  }
-  const positiveHz = (value: string | undefined) => {
-    if (value === '0Hz' || value === '0' || value === undefined || value === '') return '+0Hz'
-    return value
-  }
-  return {
-    text: text.trim(),
-    pitch: positiveHz(pitch),
-    voice: positivePercent(voice),
-    rate: positivePercent(rate),
-    volume: positivePercent(volume),
-    useLLM,
-  }
+import { createOpenAIClient } from '../utils/openai'
+import { AUDIO_DIR, STATIC_DOMAIN, FILE_DOWNLOAD_PATH, FILE_DOWNLOAD_TTL_MS } from '../config'
+import { positiveHz, positivePercent, formatEdgeBody } from '../utils/format'
+import { buildDownloadUrl } from '../utils/fileToken'
+
+// 保留旧 formatBody 形状（向后兼容 stream 内的 '' 兜底），由 utils/format.formatEdgeBody 统一。
+const _legacyFormatBody = ({ text, pitch, voice, volume, rate, useLLM, engine }: EdgeSchema) => {
+  void positiveHz
+  void positivePercent
+  return formatEdgeBody({ text, pitch, voice, volume, rate, useLLM, engine })
 }
+
 /**
  * @description 流式返回音频, 支持长文本
- * @param req
- * @param res
- * @param next
- * @returns ReadableStream
  */
 export async function createTaskStream(req: Request, res: Response, next: NextFunction) {
   try {
     if (req.query?.mock) {
       logger.info('Mocking audio stream...')
-      streamWithLimit(res, path.join(__dirname, '../../mock/flying.mp3'), 1280) // Mock stream with limit
+      streamWithLimit(res, path.join(__dirname, '../../mock/flying.mp3'), 1280)
       return
     }
     logger.debug('Generating audio with body:', req.body)
-    const formattedBody = formatBody(req.body)
+    const formattedBody = formatEdgeBody(req.body)
     const task = taskManager.createTask(formattedBody)
     task.context = { req, res, body: req.body }
     logger.info(`Generated stream task ID: ${task.id}`)
-    generateTTSStream(formattedBody, task)
+    generateTTSStream(formattedBody, task, createOpenAIClient(req.openaiOverrides))
   } catch (error) {
-    console.log(`createTaskStream error:`, error)
+    logger.error(`createTaskStream error: ${(error as Error).message}`)
     next(error)
   }
 }
+
 export async function generateJson(req: Request, res: Response, next: NextFunction) {
   try {
     const data = req.body?.data
     logger.debug('generateJson with body:', data)
-    const formatedBody = data.map((item: any) => formatBody(item))
+    const formatedBody = data.map((item: any) => formatEdgeBody(item))
     const text = data.map((item: any) => item.text).join('')
     const taskParams = {
       ...formatedBody[0],
@@ -67,7 +57,7 @@ export async function generateJson(req: Request, res: Response, next: NextFuncti
     logger.info(`Generated stream task ID: ${task.id}`)
     generateTTSStreamJson(formatedBody, task)
   } catch (error) {
-    console.log(`createTaskStream error:`, error)
+    logger.error(`generateJson error: ${(error as Error).message}`)
     next(error)
   }
 }
@@ -92,13 +82,13 @@ export async function resumeTask(req: Request, res: Response, next: NextFunction
     const checkpoint = await readJson<any>(checkpointPath)
     const outputId = checkpoint.outputId
 
-    // 检查是否有已完成的文件
     const files: string[] = []
     let fileIndex = 1
     while (true) {
-      const filePath = path.resolve(AUDIO_DIR, `${outputId}_${fileIndex}.mp3`)
+      const fileName = `${outputId}_${fileIndex}.mp3`
+      const filePath = path.resolve(AUDIO_DIR, fileName)
       if (await fileExist(filePath)) {
-        files.push(`${STATIC_DOMAIN}/${outputId}_${fileIndex}.mp3`)
+        files.push(buildDownloadUrl(STATIC_DOMAIN, FILE_DOWNLOAD_PATH, fileName, FILE_DOWNLOAD_TTL_MS))
         fileIndex++
       } else {
         break
@@ -116,14 +106,35 @@ export async function resumeTask(req: Request, res: Response, next: NextFunction
     }
 
     logger.info(`Resume task: ${taskId}, progress: ${result.progress}%`)
-
-    res.json({
-      code: 200,
-      data: result,
-      success: true,
-    })
+    res.json({ code: 200, data: result, success: true })
   } catch (error) {
-    console.log(`resumeTask error:`, error)
+    logger.error(`resumeTask error: ${(error as Error).message}`)
+    next(error)
+  }
+}
+
+/**
+ * 取消正在运行的 TTS 任务
+ * - 让流式生成循环跳出（checkpoint 保留，可 resume）
+ */
+export async function cancelTask(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { taskId } = req.params
+    const task = taskManager.cancelTask(taskId)
+    if (!task) {
+      res.status(404).json({ code: 404, message: 'task not found', success: false })
+      return
+    }
+    try {
+      const res = task.context?.res
+      if (res && !res.writableEnded) {
+        res.end()
+      }
+    } catch (e) {
+      logger.warn('cancelTask close res error', e)
+    }
+    res.json({ code: 200, data: { id: taskId, status: task.status }, success: true })
+  } catch (error) {
     next(error)
   }
 }

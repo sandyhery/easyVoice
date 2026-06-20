@@ -142,7 +142,26 @@
                   :format-tooltip="formatPitch"
                 />
               </el-form-item>
+
+              <el-form-item label="引擎">
+                <el-select v-model="audioConfig.engine" placeholder="选择 TTS 引擎">
+                  <el-option
+                    v-for="e in engines"
+                    :key="e.name"
+                    :label="e.name"
+                    :value="e.name"
+                  />
+                </el-select>
+              </el-form-item>
             </el-form>
+            <VoiceProfilePanel
+              :voice="audioConfig.selectedVoice"
+              :rate="`${audioConfig.rate > 0 ? '+' : ''}${audioConfig.rate}%`"
+              :pitch="`${audioConfig.pitch > 0 ? '+' : ''}${audioConfig.pitch}Hz`"
+              :volume="`${audioConfig.volume > 0 ? '+' : ''}${audioConfig.volume}%`"
+              :engine="audioConfig.engine"
+              @apply="applyProfile"
+            />
           </div>
 
           <div v-else class="ai-settings">
@@ -209,6 +228,14 @@
       >
         生成语音
       </el-button>
+      <el-button
+        v-if="generating && currentTaskId"
+        type="warning"
+        size="large"
+        @click="handleCancel"
+      >
+        停止生成
+      </el-button>
       <el-button :disabled="generating" type="danger" size="large" @click="reset">
         重置配置
       </el-button>
@@ -252,12 +279,16 @@ import { defaultVoiceList, previewTextSelect } from '@/constants/voice'
 import DownloadList from '@/components/DownloadList.vue'
 import Notification from '@/assets/notification.mp3'
 import StreamButton from '@/components/StreamButton.vue'
+import VoiceProfilePanel from '@/components/VoiceProfilePanel.vue'
 import {
   generateTTS,
   getVoiceList,
   type Voice,
   type GenerateResponse,
   createTaskStream,
+  cancelTask,
+  listEngines,
+  type EngineInfo,
 } from '@/api/tts'
 
 const generationStore = useGenerationStore()
@@ -269,6 +300,8 @@ const streamDuration = ref<number>(0)
 const generating = ref(false)
 const previewLoading = ref(false)
 const showStreamButton = ref(false)
+const currentTaskId = ref<string>('')
+const engines = ref<EngineInfo[]>([{ name: 'edge-tts' }])
 
 const successAudio = ref<HTMLAudioElement>()
 const audioPlayer = ref<HTMLAudioElement>()
@@ -327,7 +360,7 @@ const reset = () => {
     configStore.reset()
   })
 }
-const updateConfig = (prop: keyof AudioConfig, value: string) => {
+const updateConfig = (prop: keyof AudioConfig, value: string | number) => {
   configStore.updateConfig(prop, value)
 }
 const betterShowCN = (voiceList: Voice[]) => {
@@ -491,8 +524,17 @@ const filterVoices = () => {
 }
 
 const buildParams = (text: string) => {
-  const { selectedVoice, rate, pitch, volume, openaiBaseUrl, openaiKey, openaiModel, voiceMode } =
-    audioConfig
+  const {
+    selectedVoice,
+    rate,
+    pitch,
+    volume,
+    openaiBaseUrl,
+    openaiKey,
+    openaiModel,
+    voiceMode,
+    engine,
+  } = audioConfig
   const params: any = {
     text: text.trim(),
   }
@@ -502,6 +544,7 @@ const buildParams = (text: string) => {
     params.rate = `${rate > 0 ? '+' : ''}${rate}%`
     params.pitch = `${pitch > 0 ? '+' : ''}${pitch}Hz`
     params.volume = `${volume > 0 ? '+' : ''}${volume}%`
+    if (engine) params.engine = engine
   } else {
     params.useLLM = true
     params.openaiBaseUrl = openaiBaseUrl
@@ -509,6 +552,40 @@ const buildParams = (text: string) => {
     params.openaiModel = openaiModel
   }
   return params
+}
+
+const applyProfile = (p: any) => {
+  if (p.voice) updateConfig('selectedVoice', p.voice)
+  if (p.rate) updateConfig('rate', Number(p.rate) || 0)
+  if (p.pitch) updateConfig('pitch', Number(p.pitch) || 0)
+  if (p.volume) updateConfig('volume', Number(p.volume) || 0)
+  if (p.engine) updateConfig('engine', p.engine)
+  ElMessage.success(`已应用预设：${p.name}`)
+}
+
+const handleCancel = async () => {
+  if (!currentTaskId.value) return
+  try {
+    await cancelTask(currentTaskId.value)
+    ElMessage.info('已请求停止')
+  } catch (e) {
+    ElMessage.error(`停止失败: ${(e as Error).message}`)
+  } finally {
+    generating.value = false
+    currentTaskId.value = ''
+  }
+}
+
+// 拉取已注册引擎列表
+const loadEngines = async () => {
+  try {
+    const res = await listEngines()
+    if (res.code === 200 && res.data?.length) {
+      engines.value = res.data
+    }
+  } catch {
+    /* 静默失败：保留默认 edge-tts */
+  }
 }
 
 const previewAudio = async () => {
@@ -602,10 +679,18 @@ const generateAudioTask = async () => {
 
   try {
     const params = buildParams(inputText)
-    const stream = await createTaskStream(params)
+    const res: any = await createTaskStream(params)
+    // res 可能是 { headers, data }，也可能是裸 ReadableStream/JSON
+    const taskId = res?.headers?.['access-control-expose-headers-generate-tts-id']
+      || res?.headers?.['x-generate-tts-id']
+      || ''
+    if (taskId) currentTaskId.value = taskId
+    const stream = res?.data ?? res
     if (!(stream instanceof ReadableStream)) {
       if (stream.code && stream.data) {
         updateAudioList(stream.data)
+        generating.value = false
+        currentTaskId.value = ''
         return
       }
     }
@@ -707,6 +792,11 @@ onMounted(async () => {
   } catch (error) {
     handle429(error)
   }
+  // 默认引擎，避免渲染时下拉为空
+  if (!audioConfig.engine) {
+    updateConfig('engine', 'edge-tts')
+  }
+  loadEngines()
 })
 </script>
 

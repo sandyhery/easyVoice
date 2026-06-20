@@ -1,5 +1,6 @@
 import { TTSEngine, TtsOptions } from '../types'
 import { fetcher } from '../../utils/request'
+import { Readable } from 'stream'
 
 const OPENAI_VOICES = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'] as const
 type OpenAIVoice = (typeof OPENAI_VOICES)[number]
@@ -10,23 +11,30 @@ type ResponseFormat = (typeof RESPONSE_FORMATS)[number]
 export class OpenAITtsEngine implements TTSEngine {
   name = 'openai-tts'
   private apiKey: string
+  private initialized = false
 
   constructor(apiKey: string) {
     if (!apiKey) {
       throw new Error('OpenAI TTS requires an API key.')
     }
     this.apiKey = apiKey
+    this.initialized = true
   }
 
-  async synthesize(text: string, options: TtsOptions): Promise<Buffer> {
-    const { speed = 1.0, voice = 'alloy', format = 'mp3' } = options
+  async synthesize(text: string, options: TtsOptions): Promise<Buffer | Readable> {
+    const {
+      speed = 1.0,
+      voice = 'alloy',
+      format = 'mp3',
+      outputType = 'buffer',
+    } = options
 
     if (typeof text !== 'string' || text.length === 0) {
       throw new Error('Input text is required.')
     }
     if (text.length > 4096) {
       throw new Error(
-        'Input text exceeds 4096 characters, which is the maximum allowed by OpenAI TTS.'
+        'Input text exceeds 4096 characters, which is the maximum allowed by OpenAI TTS.',
       )
     }
     if (!OPENAI_VOICES.includes(voice as OpenAIVoice)) {
@@ -37,11 +45,12 @@ export class OpenAITtsEngine implements TTSEngine {
     }
     if (!RESPONSE_FORMATS.includes(format as ResponseFormat)) {
       throw new Error(
-        `Invalid response format: ${format}. Supported formats are: ${RESPONSE_FORMATS.join(', ')}.`
+        `Invalid response format: ${format}. Supported formats are: ${RESPONSE_FORMATS.join(', ')}.`,
       )
     }
 
     try {
+      const wantStream = outputType === 'stream'
       const response = await fetcher.post(
         'https://api.openai.com/v1/audio/speech',
         {
@@ -50,17 +59,18 @@ export class OpenAITtsEngine implements TTSEngine {
           voice,
           speed,
           response_format: format,
+          // OpenAI 支持流式输出
+          ...(wantStream ? { stream: true } : {}),
         },
         {
           headers: {
             Authorization: `Bearer ${this.apiKey}`,
             'Content-Type': 'application/json',
           },
-          responseType: 'arraybuffer',
-        }
+          responseType: wantStream ? 'stream' : 'arraybuffer',
+        },
       )
-
-      return Buffer.from(response.data)
+      return wantStream ? (response.data as Readable) : Buffer.from(response.data)
     } catch (error) {
       const err = error as any
       if (err.response?.status === 401) {

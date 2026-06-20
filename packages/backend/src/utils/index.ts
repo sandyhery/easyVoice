@@ -1,4 +1,5 @@
 import fs from 'fs/promises'
+import { SRT_WAIT_MAX_MS } from '../config'
 import { createReadStream, createWriteStream } from 'fs'
 import { resolve } from 'path'
 import { Response } from 'express'
@@ -18,11 +19,18 @@ export async function getLangConfig(text: string) {
 }
 
 export async function readJson<T>(path: string): Promise<T> {
+  // 失败抛错（让调用方决定如何处理）。需要兜底时可显式用 readJsonOrEmpty。
+  const data = await fs.readFile(path, 'utf-8')
+  return JSON.parse(data) as T
+}
+
+/** 旧版兜底：文件不存在或解析失败时返回空对象。仅用于不致命的可选文件。 */
+export async function readJsonOrEmpty<T>(path: string): Promise<T> {
   try {
     const data = await fs.readFile(path, 'utf-8')
-    return JSON.parse(data)
+    return JSON.parse(data) as T
   } catch (err) {
-    console.log(`readJson ${path} error:`, (err as Error).message)
+    logger.warn(`readJsonOrEmpty ${path} failed: ${(err as Error).message}`)
     return {} as T
   }
 }
@@ -254,3 +262,19 @@ export function escapeSSML(text: string) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
 }
+
+/**
+ * 等待 edge-tts 写完 .srt.json 临时文件，最多 ~1.5s。
+ * 之前用 setTimeout(200) 赌时间窗口，不可靠；改为轮询。
+ */
+export async function waitForSrtSource(audioPath: string, maxWaitMs: number = SRT_WAIT_MAX_MS, intervalMs: number = 50): Promise<void> {
+  const jsonPath = audioPath + '.srt.json'
+  const deadline = Date.now() + maxWaitMs
+  while (Date.now() < deadline) {
+    if (await fileExist(jsonPath)) return
+    await new Promise((r) => setTimeout(r, intervalMs))
+  }
+  // 超时也不抛错，让 handleSrt 自己处理
+}
+
+

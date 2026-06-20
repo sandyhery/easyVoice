@@ -1,20 +1,15 @@
 import { Request, Response, NextFunction } from 'express'
 import { generateTTS } from '../services/tts.service'
+import { createOpenAIClient } from '../utils/openai'
 import { logger } from '../utils/logger'
 import path from 'path'
-import fs from 'fs/promises'
-import { ALLOWED_EXTENSIONS, AUDIO_DIR } from '../config'
 import { EdgeSchema } from '../schema/generate'
 import taskManager from '../utils/taskManager'
-function formatBody({ text, pitch, voice, volume, rate, useLLM }: EdgeSchema) {
-  const positivePercent = (value: string | undefined) => {
-    if (value === '0%' || value === '0' || value === undefined) return '+0%'
-    return value
-  }
-  const positiveHz = (value: string | undefined) => {
-    if (value === '0Hz' || value === '0' || value === undefined) return '+0Hz'
-    return value
-  }
+import { buildDownloadUrl } from '../utils/fileToken'
+import { FILE_DOWNLOAD_PATH, FILE_DOWNLOAD_TTL_MS, STATIC_DOMAIN } from '../config'
+import { positiveHz, positivePercent } from '../utils/format'
+
+function formatBody({ text, pitch, voice, volume, rate, useLLM, engine }: EdgeSchema) {
   return {
     text: text.trim(),
     pitch: positiveHz(pitch),
@@ -22,8 +17,27 @@ function formatBody({ text, pitch, voice, volume, rate, useLLM }: EdgeSchema) {
     rate: positivePercent(rate),
     volume: positivePercent(volume),
     useLLM,
+    engine: engine || 'edge-tts',
   }
 }
+
+/**
+ * 把 service 层返回的 TTSResult 包装成可对外暴露的形态：
+ *  - audio / srt 改为带 HMAC token 的下载 URL
+ *  - 额外提供不带前缀的 file 字段供前端 <audio src> 拼接
+ */
+function withSignedUrls(result: TTSResult) {
+  const audioFile = path.parse(result.audio).base
+  const srtFile = path.parse(result.srt).base
+  return {
+    ...result,
+    audio: buildDownloadUrl(STATIC_DOMAIN, FILE_DOWNLOAD_PATH, audioFile, FILE_DOWNLOAD_TTL_MS),
+    srt: buildDownloadUrl(STATIC_DOMAIN, FILE_DOWNLOAD_PATH, srtFile, FILE_DOWNLOAD_TTL_MS),
+    file: audioFile,
+    srtFile,
+  }
+}
+
 export async function createTask(req: Request, res: Response, next: NextFunction) {
   try {
     logger.debug('Generating audio with body:', req.body)
@@ -31,32 +45,20 @@ export async function createTask(req: Request, res: Response, next: NextFunction
     const task = taskManager.createTask(formattedBody)
     logger.info(`Generated task ID: ${task.id}`)
 
-    generateTTS(formattedBody, task)
+    generateTTS(formattedBody, task, createOpenAIClient(req.openaiOverrides))
       .then((result) => {
-        const data = {
-          ...result,
-          file: path.parse(result.audio).base,
-          srt: path.parse(result.srt).base,
-        }
-        taskManager.updateTask(task.id, { result: data })
-        logger.info(`Updated task ID: ${task.id} with result`, result)
+        taskManager.updateTask(task.id, { result: withSignedUrls(result) })
+        logger.info(`Updated task ID: ${task.id} with result`)
       })
       .catch((err) => {
-        const data = {
-          message: (err as Error).message,
-        }
-        taskManager.failTask(task.id, data)
+        taskManager.failTask(task.id, { message: (err as Error).message })
       })
-    const data = {
-      success: true,
-      data: { ...task },
-      code: 200,
-    }
-    res.json(data)
+    res.json({ success: true, data: { ...task }, code: 200 })
   } catch (error) {
     next(error)
   }
 }
+
 export async function getTask(req: Request, res: Response, next: NextFunction) {
   const taskId = req.params.id
   try {
@@ -65,16 +67,12 @@ export async function getTask(req: Request, res: Response, next: NextFunction) {
       res.status(404).json({ success: false, message: 'Task not found', code: 404 })
       return
     }
-    const data = {
-      success: true,
-      data: { ...task },
-      code: 200,
-    }
-    res.json(data)
+    res.json({ success: true, data: { ...task }, code: 200 })
   } catch (error) {
     next(error)
   }
 }
+
 export async function getTaskStats(_req: Request, res: Response, next: NextFunction) {
   try {
     const stats = taskManager.getTaskStats()
@@ -83,78 +81,24 @@ export async function getTaskStats(_req: Request, res: Response, next: NextFunct
       res.status(404).json({ success: false, message: 'stats not found', code: 404 })
       return
     }
-    const data = {
-      success: true,
-      data: { ...stats },
-      code: 200,
-    }
-    res.json(data)
+    res.json({ success: true, data: { ...stats }, code: 200 })
   } catch (error) {
     next(error)
   }
 }
+
 export async function generateAudio(req: Request, res: Response, next: NextFunction) {
   try {
     logger.debug('Generating audio with body:', req.body)
     const formattedBody = formatBody(req.body)
-    let result = await generateTTS(formattedBody)
-    const responseResult = {
+    const result = await generateTTS(formattedBody, undefined, createOpenAIClient(req.openaiOverrides))
+    res.json({
       success: true,
-      data: {
-        ...result,
-        file: path.parse(result.audio).base,
-        srt: path.parse(result.srt).base,
-      },
+      data: withSignedUrls(result),
       code: 200,
-    }
-    res.json(responseResult)
+    })
   } catch (error) {
     next(error)
-  }
-}
-
-export async function downloadAudio(req: Request, res: Response): Promise<void> {
-  const fileName = req.params.file
-
-  try {
-    if (!fileName || typeof fileName !== 'string') {
-      throw new Error('Invalid file name')
-    }
-
-    const fileExt = path.extname(fileName).toLowerCase()
-    if (!ALLOWED_EXTENSIONS.has(fileExt)) {
-      throw new Error('Invalid file type')
-    }
-
-    const safeFileName = path.basename(fileName)
-    const encodedFileName = encodeURIComponent(safeFileName)
-    const filePath = path.join(AUDIO_DIR, safeFileName)
-
-    await fs.access(filePath, fs.constants.R_OK)
-
-    res.setHeader('Content-Type', `audio/${fileExt.slice(1)}`)
-    res.setHeader('Content-Disposition', `attachment; filename="${encodedFileName}"`)
-
-    res.download(filePath, safeFileName, (err) => {
-      if (err) {
-        throw err
-      }
-      logger.info(`Successfully downloaded file: ${safeFileName}`)
-    })
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error)
-    logger.error(`Download failed for ${fileName}: ${errorMessage}`)
-
-    const statusCode = errorMessage.includes('Invalid')
-      ? 400
-      : errorMessage.includes('ENOENT')
-      ? 404
-      : 500
-
-    res.status(statusCode).json({
-      error: 'Failed to download file',
-      message: errorMessage,
-    })
   }
 }
 

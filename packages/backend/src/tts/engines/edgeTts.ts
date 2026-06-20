@@ -8,7 +8,6 @@ export class EdgeTtsEngine implements TTSEngine {
 
   async synthesize(text: string, options: TtsOptions): Promise<Buffer | Readable> {
     const {
-      speed = 1.0,
       voice = 'en-US-AriaNeural',
       pitch,
       rate,

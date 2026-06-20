@@ -10,3 +10,10 @@ run.test.sh
 run.prod.sh
 **test**.sh
 scripts/docker-compose.yml
+
+# Machine learning models & Python cache (don't commit 152MB ONNX to git)
+**/g2pW/
+**/g2pW/**
+*.onnx
+__pycache__/
+**/__pycache__/
