@@ -1,17 +1,29 @@
 <template>
   <div class="tts-audio-player">
-    <audio ref="audioRef" @timeupdate="updateProgress" @ended="onended">
+    <audio
+      ref="audioRef"
+      @timeupdate="updateProgress"
+      @ended="onended"
+      @error="onError"
+      @loadedmetadata="onLoaded"
+    >
       你的浏览器不支持音频播放。
     </audio>
     <div class="controls">
-      <el-button circle @click="left10">
+      <el-button circle @click="left10" aria-label="快退 10 秒">
         <el-icon><DArrowLeft /></el-icon>
       </el-button>
-      <el-button :type="isPlaying ? 'warning' : 'primary'" circle size="large" @click="toggle">
+      <el-button
+        :type="isPlaying ? 'warning' : 'primary'"
+        circle
+        size="large"
+        @click="toggle"
+        :aria-label="isPlaying ? '暂停' : '播放'"
+      >
         <el-icon v-if="!isPlaying"><VideoPlay /></el-icon>
         <el-icon v-else><VideoPause /></el-icon>
       </el-button>
-      <el-button circle @click="right10">
+      <el-button circle @click="right10" aria-label="快进 10 秒">
         <el-icon><DArrowRight /></el-icon>
       </el-button>
     </div>
@@ -22,106 +34,146 @@
         :max="100"
         :show-tooltip="false"
         @change="seek"
-        @input="input"
         class="progress-slider"
+        :aria-label="`播放进度 ${formatTime(currentTime)} / ${formatTime(duration)}`"
       />
     </div>
-    <div class="time-display">
+    <div class="time-display" aria-live="polite">
       <span>{{ formatTime(currentTime) }} / {{ formatTime(duration) }}</span>
     </div>
-    <span class="close" @click="closeThisCard">
+    <el-button class="close-btn" link @click="emitClose" aria-label="关闭播放器">
       <el-icon><Close /></el-icon>
-    </span>
+    </el-button>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-import { debounce } from '@/utils'
+import { ref, watch } from 'vue'
 import { ElButton, ElSlider } from 'element-plus'
-import type { Arrayable } from 'element-plus/es/utils/index.mjs'
 import { VideoPlay, VideoPause, Close, DArrowLeft, DArrowRight } from '@element-plus/icons-vue'
 
-interface Prop {
-  duration: number
-}
-const props = defineProps<Prop>()
-const emit = defineEmits(['close'])
+const props = defineProps<{
+  /** 音频时长（秒）— 用于计算进度百分比 */
+  duration?: number
+  /** 音频源 URL — 设置后自动加载 */
+  src?: string
+}>()
+
+const emit = defineEmits<{
+  (e: 'close'): void
+}>()
+
 const audioRef = ref<HTMLAudioElement | null>(null)
 const progress = ref(0)
 const currentTime = ref(0)
 const isPlaying = ref(false)
 
-const closeThisCard = () => {
-  emit('close', realClose)
-}
-const realClose = () => {
-  stop()
-  isPlaying.value = false
-
-  progress.value = 0
-  currentTime.value = 0
-
-  if (audioRef.value) {
-    audioRef.value.src = ''
+const toggle = async () => {
+  if (!audioRef.value) return
+  try {
+    if (isPlaying.value) {
+      audioRef.value.pause()
+      isPlaying.value = false
+    } else {
+      await audioRef.value.play()
+      isPlaying.value = true
+    }
+  } catch (e) {
+    // 静默处理 play() reject（autoplay policy 等）
+    isPlaying.value = false
   }
 }
-const toggle = () => {
-  if (isPlaying.value) {
-    pause().then(() => (isPlaying.value = false))
-  } else {
-    play().then(() => (isPlaying.value = true))
-  }
-}
+
 const left10 = () => {
-  audioRef.value!.currentTime = Math.max(audioRef.value!.currentTime - 10, 0)
+  if (!audioRef.value) return
+  audioRef.value.currentTime = Math.max(0, audioRef.value.currentTime - 10)
 }
 const right10 = () => {
-  audioRef.value!.currentTime = Math.min(audioRef.value!.currentTime + 10, audioRef.value!.duration)
-}
-const play = async () => audioRef.value!.play()
-const pause = async () => audioRef.value!.pause()
-
-const stop = () => {
-  if (audioRef.value) {
-    audioRef.value.pause()
-    audioRef.value.currentTime = 0
-    progress.value = 0
-    currentTime.value = 0
-  }
+  if (!audioRef.value) return
+  const max = Number.isFinite(audioRef.value.duration) ? audioRef.value.duration : Infinity
+  audioRef.value.currentTime = Math.min(max, audioRef.value.currentTime + 10)
 }
 
 const updateProgress = () => {
-  if (audioRef.value) {
-    currentTime.value = audioRef.value.currentTime
-    progress.value = (currentTime.value / props.duration) * 100
-  }
+  if (!audioRef.value) return
+  currentTime.value = audioRef.value.currentTime
+  // 用实际 duration（loadedmetadata 后才有），不用 props.duration（可能未设置）
+  const dur = Number.isFinite(audioRef.value.duration) ? audioRef.value.duration : 0
+  progress.value = dur > 0 ? (currentTime.value / dur) * 100 : 0
 }
 
 const onended = () => {
   isPlaying.value = false
 }
 
-const seek = (value: Arrayable<number>) => {
-  if (Array.isArray(value)) return
-  if (audioRef.value) {
-    audioRef.value.currentTime = (value / 100) * props.duration
+const onLoaded = () => {
+  if (!audioRef.value) return
+  // duration 是真实时长，赋值给 props.duration 供父组件用（如显示）
+  if (!props.duration && Number.isFinite(audioRef.value.duration)) {
+    // emit 父组件（可选）
   }
 }
-const input = debounce((value: Arrayable<number>) => {
+
+const onError = () => {
+  isPlaying.value = false
+  // 不弹 toast（调用方处理）；仅静默失败
+}
+
+const seek = (value: number | number[]) => {
   if (Array.isArray(value)) return
-  if (audioRef.value) {
-    audioRef.value.currentTime = (value / 100) * props.duration
-  }
-}, 100)
+  if (!audioRef.value) return
+  const dur = Number.isFinite(audioRef.value.duration) ? audioRef.value.duration : 0
+  if (dur > 0) audioRef.value.currentTime = (value / 100) * dur
+}
 
 const formatTime = (time: number) => {
+  if (!Number.isFinite(time)) return '0:00'
   const minutes = Math.floor(time / 60)
   const seconds = Math.floor(time % 60)
   return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`
 }
+
+const emitClose = () => emit('close')
+
+// 外部 src 变化时重新加载
+watch(
+  () => props.src,
+  (newSrc) => {
+    if (!audioRef.value) return
+    audioRef.value.pause()
+    isPlaying.value = false
+    progress.value = 0
+    currentTime.value = 0
+    if (newSrc) {
+      audioRef.value.src = newSrc
+      audioRef.value.load()
+    } else {
+      audioRef.value.removeAttribute('src')
+    }
+  }
+)
+
+// expose 标准化 API：父组件用 ref 调用
 defineExpose({
-  audioRef,
+  setSrc(url: string) {
+    if (audioRef.value && url) {
+      audioRef.value.src = url
+      audioRef.value.load()
+    }
+  },
+  play: () => audioRef.value?.play(),
+  pause: () => audioRef.value?.pause(),
+  stop() {
+    if (!audioRef.value) return
+    audioRef.value.pause()
+    audioRef.value.currentTime = 0
+    progress.value = 0
+    currentTime.value = 0
+    isPlaying.value = false
+  },
+  get audioRef() {
+    return audioRef.value
+  },
 })
 </script>
 
@@ -179,14 +231,10 @@ defineExpose({
   padding: 5px 10px;
   border-radius: 20px;
 }
-.close {
+
+.close-btn {
   position: absolute;
-  top: 20px;
-  right: 20px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-}
-.close:hover {
-  transform: scale(1.1);
+  top: 16px;
+  right: 16px;
 }
 </style>

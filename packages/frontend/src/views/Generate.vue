@@ -510,7 +510,11 @@ const handleFile = async (file: any) => {
   try {
     const buffer = await file.raw.arrayBuffer()
     const bytes = new Uint8Array(buffer)
-    const text = new TextDecoder('gb18030').decode(bytes)
+    // 优先 UTF-8（现代文件主流），含 replacement char 则 fallback 到 gb18030（中文 Windows 默认）
+    let text = new TextDecoder('utf-8').decode(bytes)
+    if (text.includes('�')) {
+      text = new TextDecoder('gb18030').decode(bytes)
+    }
     updateConfig('inputText', text)
   } catch {
     ElMessage.error('文件读取错误，请上传 txt 文本！')

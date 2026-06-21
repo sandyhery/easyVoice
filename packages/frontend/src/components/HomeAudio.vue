@@ -60,6 +60,8 @@
 </template>
 
 <script setup lang="ts">
+// HomeAudio 是首页演示组件：固定播放 Hero.mp3，不与 audioConfig store 联动
+// （保留 demo 独立性，避免 demo 文本生成污染 store）
 import Hero from '@/assets/hero.mp3'
 import { VideoPause, CaretRight, ChatLineRound } from '@element-plus/icons-vue'
 import { ref, onMounted, onBeforeUnmount } from 'vue'

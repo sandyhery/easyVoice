@@ -76,7 +76,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Plus, Delete } from '@element-plus/icons-vue'
 import {
@@ -198,6 +198,20 @@ const removeProfile = async (id: string) => {
 }
 
 defineExpose({ removeProfile, loadProfiles })
+
+// 联动：父组件修改 audioConfig.selectedVoice 后，自动反选匹配的预设
+watch(
+  () => props.voice,
+  (v) => {
+    if (!v || !profiles.value.length) return
+    const match = profiles.value.find((p) => p.voice === v)
+    if (match && selectedId.value !== match.id) {
+      selectedId.value = match.id
+    } else if (!match && selectedId.value) {
+      selectedId.value = ''
+    }
+  }
+)
 
 onMounted(loadProfiles)
 </script>
