@@ -175,19 +175,31 @@ export interface VoiceProfile {
 }
 export const listProfiles = async () => {
   const response = await api.get<ResponseWrapper<VoiceProfile[]>>('/profile')
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '加载预设失败')
+  }
   return response.data
 }
 export const createProfile = async (
   data: Omit<VoiceProfile, 'id' | 'createdAt' | 'updatedAt'>
 ) => {
   const response = await api.post<ResponseWrapper<VoiceProfile>>('/profile', data)
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '保存预设失败')
+  }
   return response.data
 }
 export const updateProfile = async (id: string, data: Partial<VoiceProfile>) => {
   const response = await api.put<ResponseWrapper<VoiceProfile>>(`/profile/${id}`, data)
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '更新预设失败')
+  }
   return response.data
 }
 export const deleteProfile = async (id: string) => {
   const response = await api.delete<ResponseWrapper<null>>(`/profile/${id}`)
+  if (response.data?.code !== 200) {
+    throw new Error(response.data?.message || '删除预设失败')
+  }
   return response.data
 }

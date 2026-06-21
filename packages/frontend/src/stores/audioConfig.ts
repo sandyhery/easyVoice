@@ -84,6 +84,8 @@ function loadFromStorage(): Partial<AudioConfig> {
 
 // 节流：slider 拖动时会高频调用 updateConfig，存盘做 IO 阻塞没意义
 // 300ms 已经远低于人眼可感知的延迟，又能把每秒 60 次的写盘压到 3 次
+// debounce timer：模块级即可（Pinia store 在同一 app 单例）
+// unref 防止 jest / SSR 等环境进程被 timer 拖住不退出
 let persistTimer: ReturnType<typeof setTimeout> | null = null
 let sessionTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -113,12 +115,14 @@ function savePersist(state: AudioConfig) {
   if (typeof window === 'undefined') return
   if (persistTimer) clearTimeout(persistTimer)
   persistTimer = setTimeout(() => flushPersist(state), 300)
+  ;(persistTimer as any)?.unref?.()
 }
 
 function saveSession(state: AudioConfig) {
   if (typeof window === 'undefined') return
   if (sessionTimer) clearTimeout(sessionTimer)
   sessionTimer = setTimeout(() => flushSession(state), 300)
+  ;(sessionTimer as any)?.unref?.()
 }
 
 export const useAudioConfigStore = defineStore('audioConfig', () => {
