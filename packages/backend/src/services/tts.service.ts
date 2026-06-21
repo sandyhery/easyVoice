@@ -135,6 +135,10 @@ async function generateWithLLM(
       return Number(((count / segments.length) * 100).toFixed(2))
     }
     for (let seg of segments) {
+      if (task?.cancelled) {
+        logger.info(`generateWithLLM cancelled at ${count}/${segments.length}`)
+        break
+      }
       count++
       const prompt = getPrompt(lang, voiceList, seg)
       // logger.debug(`Prompt for LLM: ${prompt}`)
@@ -145,12 +149,21 @@ async function generateWithLLM(
           'LLM response is not an array, please switch to Edge TTS mode or use another model'
         )
       }
+      if (task?.cancelled) {
+        logger.info(`generateWithLLM cancelled before buildSegmentList ${count}`)
+        break
+      }
       const result = await buildSegmentList(
         { ...segment, id: `[segments:${count}]${segment.id}` },
-        formatLlmSegments(llmSegments)
+        formatLlmSegments(llmSegments),
+        task
       )
       task?.updateProgress?.(task.id, getProgress())
       finalSegments.push(result)
+    }
+    if (task?.cancelled) {
+      // 抛错让上层 failTask 处理（而不是返回半成品结果）
+      throw new Error('cancelled by user')
     }
     return await buildFinal(finalSegments, id)
   }
@@ -236,6 +249,7 @@ async function buildSegmentList(
     return Number((((handledLength / length) * 100) / (id.includes('segment') ? 2 : 1)).toFixed(2))
   }
   const tasks = segments.map((segment, index) => async () => {
+    if (task?.cancelled) return null
     const { text, pitch, voice, rate, volume } = segment
     const output = path.resolve(tmpDirPath, `${index + 1}_splits.mp3`)
     const cacheKey = taskManager.generateTaskId({ text, pitch, voice, rate, volume })
@@ -245,7 +259,9 @@ async function buildSegmentList(
       fileList.push(cache.audio)
       return cache
     }
+    if (task?.cancelled) return null
     const result = await generateSingleVoice({ text, pitch, voice, rate, volume, output })
+    if (task?.cancelled) return null
     logger.debug(`Cache miss and generate audio: ${result.audio}, ${result.srt}`)
     fileList.push(result.audio)
     handledLength++
@@ -255,7 +271,11 @@ async function buildSegmentList(
     return result
   })
   let partial = false
-  const results = await runConcurrentTasks(tasks, EDGE_API_LIMIT)
+  const results = await runConcurrentTasks(tasks, EDGE_API_LIMIT, () => task?.cancelled === true)
+  if (task?.cancelled) {
+    logger.info(`buildSegmentList cancelled, skip concat`)
+    throw new Error('cancelled by user')
+  }
   if (results?.some((result) => !result.success)) {
     logger.warn(`Partial result detected, some splits generated audio failed!`, results)
     partial = true

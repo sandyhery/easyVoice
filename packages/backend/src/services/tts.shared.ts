@@ -112,14 +112,19 @@ export function validateTTSResult(result: TTSResult, segmentId: string): void {
 
 /**
  * 并发执行任务
+ *  - isCancelled 可选：注入 cancel 检查函数，让 controller 能响应 cancel
  */
 export async function runConcurrentTasks(
   tasks: (() => Promise<any>)[],
-  limit: number = EDGE_API_LIMIT
+  limit: number = EDGE_API_LIMIT,
+  isCancelled?: () => boolean
 ): Promise<any[]> {
   logger.debug(`Running ${tasks.length} tasks with a limit of ${limit}`)
-  const controller = new MapLimitController(tasks, limit, () =>
-    logger.info('All concurrent tasks completed')
+  const controller = new MapLimitController(
+    tasks,
+    limit,
+    () => logger.info('All concurrent tasks completed'),
+    isCancelled ? { isCancelled } : undefined
   )
   const { results, cancelled } = await controller.run()
   logger.info(`Tasks completed: ${results.length}, cancelled: ${cancelled}`)

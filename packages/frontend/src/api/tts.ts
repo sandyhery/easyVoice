@@ -15,6 +15,7 @@ export interface GenerateRequest {
   rate?: string
   pitch?: string
   useLLM?: boolean
+  engine?: string
   openaiBaseUrl?: string
   openaiKey?: string
   openaiModel?: string

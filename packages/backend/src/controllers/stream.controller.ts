@@ -131,12 +131,13 @@ export async function cancelTask(req: Request, res: Response, next: NextFunction
     try {
       const targetRes = task.context?.res
       if (targetRes && !targetRes.writableEnded) {
-        // setImmediate 延后到下一个 tick，确保流管道先收到 close 事件
+        // 用 destroy() 而非 end()：强制关闭且不再允许 write
+        // 避免 streamToResponse 后续 data/error 事件触发 ERR_STREAM_WRITE_AFTER_END
         setImmediate(() => {
           try {
-            targetRes.end()
+            targetRes.destroy()
           } catch (e) {
-            logger.warn('cancelTask deferred end error', e)
+            logger.warn('cancelTask deferred destroy error', e)
           }
         })
       }

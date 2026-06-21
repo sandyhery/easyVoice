@@ -51,14 +51,24 @@ export async function createTask(req: Request, res: Response, next: NextFunction
     logger.debug('Generating audio with body:', req.body)
     const formattedBody = formatBody(req.body)
     const task = taskManager.createTask(formattedBody)
+    // 注册 cancel 回调：让非流式任务也能被中途取消
+    task.cancel = () => {
+      task.cancelled = true
+    }
     logger.info(`Generated task ID: ${task.id}`)
 
     generateTTS(formattedBody, task, createOpenAIClient(req.openaiOverrides))
       .then((result) => {
+        // cancel 后不应再 updateTask 覆盖状态
+        if (task.cancelled) {
+          logger.info(`Task ${task.id} cancelled, skip updateTask`)
+          return
+        }
         taskManager.updateTask(task.id, { result: withSignedUrls(result) })
         logger.info(`Updated task ID: ${task.id} with result`)
       })
       .catch((err) => {
+        if (task.cancelled) return
         taskManager.failTask(task.id, { message: (err as Error).message })
       })
     res.json({ success: true, data: { ...task }, code: 200 })
@@ -99,7 +109,17 @@ export async function generateAudio(req: Request, res: Response, next: NextFunct
   try {
     logger.debug('Generating audio with body:', req.body)
     const formattedBody = formatBody(req.body)
-    const result = await generateTTS(formattedBody, undefined, createOpenAIClient(req.openaiOverrides))
+    // 短路径也创建 task，让用户能 cancel
+    const task = taskManager.createTask(formattedBody)
+    task.cancel = () => {
+      task.cancelled = true
+    }
+    const result = await generateTTS(formattedBody, task, createOpenAIClient(req.openaiOverrides))
+    if (task.cancelled) {
+      // 用户中途取消：不返回结果
+      res.status(499).json({ code: 499, message: 'cancelled', success: false })
+      return
+    }
     res.json({
       success: true,
       data: withSignedUrls(result),

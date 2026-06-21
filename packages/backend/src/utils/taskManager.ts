@@ -99,7 +99,17 @@ class TaskManager {
 
   finishTask(taskId: string) {
     const task = this.tasks.get(taskId)
-    if (!task) throw new Error(`Cannot find task: ${taskId}`)
+    if (!task) {
+      // 已被 idle unload 清掉，视为完成
+      logger.debug(`finishTask: task ${taskId} not in memory (already idle-unloaded)`)
+      return null as any
+    }
+    // 已被 cancel 的任务不能再被 endTask 翻回 completed
+    if (task.cancelled || task.status === 'cancelled') {
+      logger.debug(`finishTask: task ${taskId} already cancelled, skip`)
+      return task
+    }
+    if (task.status === 'completed' || task.status === 'failed') return task
     task.status = 'completed'
     task.progress = 100
     task.updatedAt = new Date()
@@ -119,15 +129,21 @@ class TaskManager {
   cancelTask(taskId: string): Task | null {
     const task = this.tasks.get(taskId)
     if (!task) return null
-    if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
-      return task
-    }
+    // 幂等：已取消的 task 不重复触发 cancel 回调
+    if (task.cancelled || task.status === 'cancelled') return task
+    // 终态任务不能取消
+    if (task.status === 'completed' || task.status === 'failed') return task
+
     task.cancelled = true
     task.status = 'cancelled'
     task.message = 'cancelled by user'
     task.updatedAt = new Date()
     task.finishedAt = new Date()
-    task.cancel?.()
+    try {
+      task.cancel?.()
+    } catch (e) {
+      logger.warn(`cancelTask: cancel callback threw for ${taskId}: ${(e as Error).message}`)
+    }
     logger.info(`Task ${taskId} cancelled`)
     this.scheduleIdleUnload()
     return task

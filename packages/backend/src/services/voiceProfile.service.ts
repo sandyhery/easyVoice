@@ -71,6 +71,20 @@ const profileSchema = z.object({
 // 内存缓存：避免每次请求都读盘
 let cache: { profiles: VoiceProfile[]; mtime: number } | null = null
 
+// 写锁：所有写操作（POST/PUT/DELETE）串行化执行，避免并发覆盖
+//  - 用 Promise 链实现简单互斥：每个写操作 await 当前链尾，然后挂新尾
+let writeLock: Promise<unknown> = Promise.resolve()
+
+/**
+ * 在写锁内执行 fn；确保同一时刻只有一个写操作能修改 profiles.json
+ */
+function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = writeLock.then(fn, fn)
+  // 链尾吞掉错误，避免污染下一个等待者
+  writeLock = next.catch(() => undefined)
+  return next
+}
+
 async function ensureFile(): Promise<void> {
   try {
     await fs.access(PROFILE_FILE)
@@ -92,12 +106,12 @@ async function atomicWrite(data: { profiles: VoiceProfile[] }): Promise<void> {
 
 async function readAll(): Promise<VoiceProfile[]> {
   await ensureFile()
-  if (cache) return cache.profiles
+  if (cache) return [...cache.profiles] // 浅拷贝：避免 caller 直接修改 cache 引用
   try {
     const txt = await fs.readFile(PROFILE_FILE, 'utf8')
     const obj = JSON.parse(txt) as { profiles: VoiceProfile[] }
     cache = { profiles: obj.profiles || [], mtime: Date.now() }
-    return cache.profiles
+    return [...cache.profiles]
   } catch (e) {
     logger.warn('profiles.json read failed, starting empty', e)
     return []
@@ -105,6 +119,8 @@ async function readAll(): Promise<VoiceProfile[]> {
 }
 
 async function writeAll(profiles: VoiceProfile[]): Promise<void> {
+  // 保留此函数以便其他写入路径（如数据迁移工具）使用
+  // POST/PUT/DELETE handler 已通过 mutate() 走 writeLock，无需此函数持锁
   await atomicWrite({ profiles })
 }
 
@@ -174,6 +190,20 @@ voiceProfileRouter.get(
   })
 )
 
+/**
+ * 在写锁内执行"读-改-写"复合操作
+ *  - 锁内 readAll + 修改 + writeAll 串行化
+ *  - 避免多个并发 POST/PUT/DELETE 互相覆盖
+ */
+async function mutate<T>(fn: (profiles: VoiceProfile[]) => T | Promise<T>): Promise<T> {
+  return withWriteLock(async () => {
+    const profiles = await readAll()
+    const result = await fn(profiles)
+    await atomicWrite({ profiles })
+    return result
+  }) as Promise<T>
+}
+
 // POST /api/v1/tts/profile  新建
 voiceProfileRouter.post(
   '/',
@@ -187,9 +217,10 @@ voiceProfileRouter.post(
       createdAt: now,
       updatedAt: now,
     }
-    const profiles = await readAll()
-    profiles.push(profile)
-    await writeAll(profiles)
+    await mutate((profiles) => {
+      profiles.push(profile)
+      return profile
+    })
     res.json({ code: 200, data: profile, success: true })
   })
 )
@@ -199,20 +230,23 @@ voiceProfileRouter.put(
   '/:id',
   wrap(async (req, res) => {
     const id = String(req.params.id || '')
-    const profiles = await readAll()
-    const idx = profiles.findIndex(x => x.id === id)
-    if (idx < 0) {
+    const patch = profileSchema.partial().parse(req.body)
+    let updated: VoiceProfile | null = null
+    await mutate((profiles) => {
+      const idx = profiles.findIndex(x => x.id === id)
+      if (idx < 0) return null
+      updated = {
+        ...profiles[idx],
+        ...patch,
+        updatedAt: new Date().toISOString(),
+      }
+      profiles[idx] = updated
+      return updated
+    })
+    if (!updated) {
       res.status(404).json({ code: 404, message: 'profile not found', success: false })
       return
     }
-    const patch = profileSchema.partial().parse(req.body)
-    const updated: VoiceProfile = {
-      ...profiles[idx],
-      ...patch,
-      updatedAt: new Date().toISOString(),
-    }
-    profiles[idx] = updated
-    await writeAll(profiles)
     res.json({ code: 200, data: updated, success: true })
   })
 )
@@ -222,13 +256,18 @@ voiceProfileRouter.delete(
   '/:id',
   wrap(async (req, res) => {
     const id = String(req.params.id || '')
-    const profiles = await readAll()
-    const next = profiles.filter(x => x.id !== id)
-    if (next.length === profiles.length) {
+    let deleted = false
+    await mutate((profiles) => {
+      const idx = profiles.findIndex(x => x.id === id)
+      if (idx < 0) return false
+      profiles.splice(idx, 1)
+      deleted = true
+      return true
+    })
+    if (!deleted) {
       res.status(404).json({ code: 404, message: 'profile not found', success: false })
       return
     }
-    await writeAll(next)
     res.json({ code: 200, success: true })
   })
 )

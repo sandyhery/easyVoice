@@ -233,7 +233,7 @@
         生成语音
       </el-button>
       <el-button
-        v-if="generating"
+        v-if="generating && currentTaskId"
         type="warning"
         size="large"
         @click="handleCancel"
@@ -577,7 +577,12 @@ const applyProfile = (p: VoiceProfile) => {
 }
 
 const handleCancel = async () => {
-  if (!currentTaskId.value) return
+  // 有 taskId：调后端 cancelTask API
+  // 无 taskId：短文本路径无法中途取消，仅做本地 UI 重置
+  if (!currentTaskId.value) {
+    ElMessage.info('短文本任务正在生成，请等待完成')
+    return
+  }
   try {
     await cancelTask(currentTaskId.value)
     ElMessage.info('已请求停止')
