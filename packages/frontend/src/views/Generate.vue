@@ -267,7 +267,7 @@
 import { AxiosError } from 'axios'
 import { getTask } from '@/api/tts'
 import { Sparkles } from 'lucide-vue-next'
-import { ref, computed, onMounted, watch, onBeforeMount, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, watch, onBeforeMount, onBeforeUnmount, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useGenerationStore } from '@/stores/generation'
 import { UploadFilled, Service } from '@element-plus/icons-vue'
@@ -303,6 +303,8 @@ const configStore = useAudioConfigStore()
 const { audioConfig } = configStore
 
 const streamDuration = ref<number>(0)
+// 标记当前是否正在应用 voice profile，避免 watch on selectedLanguage 误触发 previewText 重写
+const applyingProfile = ref<boolean>(false)
 
 const generating = ref(false)
 const previewLoading = ref(false)
@@ -426,6 +428,8 @@ watch(
   () => audioConfig.selectedLanguage,
   (value, oldValue) => {
     if (value === oldValue) return
+    // 防止 applyProfile 内部 updateConfig('selectedLanguage') 误触发 previewText 重写
+    if (applyingProfile) return
     const matchLang = /([a-zA-Z]{2,5}-[a-zA-Z]{2,5}\b)/.exec(value)?.[1]
     if (matchLang && matchLang in previewTextSelect) {
       updateConfig(`previewText`, previewTextSelect[matchLang as keyof typeof previewTextSelect])
@@ -562,18 +566,26 @@ const buildParams = (text: string) => {
 }
 
 const applyProfile = (p: VoiceProfile) => {
-  if (p.voice) updateConfig('selectedVoice', p.voice)
-  if (p.rate !== undefined) updateConfig('rate', parseSignedValue(p.rate))
-  if (p.pitch !== undefined) updateConfig('pitch', parseSignedValue(p.pitch))
-  if (p.volume !== undefined) updateConfig('volume', parseSignedValue(p.volume))
-  if (p.engine) updateConfig('engine', p.engine)
-  // 跨语种预设：先把 language/gender 调成 voice 的语言，再设 voice
-  if (p.voice) {
-    const langPrefix = p.voice.split('-').slice(0, 2).join('-')
-    if (langPrefix) updateConfig('selectedLanguage', langPrefix)
-    updateConfig('selectedGender', 'All')
+  applyingProfile.value = true
+  try {
+    if (p.voice) updateConfig('selectedVoice', p.voice)
+    if (p.rate !== undefined) updateConfig('rate', parseSignedValue(p.rate))
+    if (p.pitch !== undefined) updateConfig('pitch', parseSignedValue(p.pitch))
+    if (p.volume !== undefined) updateConfig('volume', parseSignedValue(p.volume))
+    if (p.engine) updateConfig('engine', p.engine)
+    // 跨语种预设：先把 language/gender 调成 voice 的语言，再设 voice
+    if (p.voice) {
+      const langPrefix = p.voice.split('-').slice(0, 2).join('-')
+      if (langPrefix) updateConfig('selectedLanguage', langPrefix)
+      updateConfig('selectedGender', 'All')
+    }
+    ElMessage.success(`已应用预设：${p.name}`)
+  } finally {
+    // 在 nextTick 后清标志，让 watch 期间跳过的副作用不再抑制
+    nextTick(() => {
+      applyingProfile.value = false
+    })
   }
-  ElMessage.success(`已应用预设：${p.name}`)
 }
 
 const handleCancel = async () => {

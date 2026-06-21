@@ -88,7 +88,8 @@ export class FileStorage extends BaseStorage {
     await this.ready()
     const meta = this.index.get(key)
     if (!meta) return null
-    if (meta.expireAt < Date.now()) {
+    // 0 视为永不过期（与 memoryStorage 语义一致）
+    if (meta.expireAt && meta.expireAt < Date.now()) {
       await this.delete(key)
       return null
     }
@@ -130,7 +131,8 @@ export class FileStorage extends BaseStorage {
     const now = Date.now()
     let removed = 0
     for (const [key, meta] of this.index) {
-      if (meta.expireAt < now) {
+      // 0 视为永不过期
+      if (meta.expireAt && meta.expireAt < now) {
         await this.delete(key)
         removed++
       }

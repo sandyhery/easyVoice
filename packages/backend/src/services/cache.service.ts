@@ -68,9 +68,15 @@ class CacheService {
         logger.info(`no cache for:${key}`)
         return item
       }
-      if (item.expireAt < Date.now()) {
-        await this.storage.delete(key) // 删除过期项
-        return null
+      if (item.expireAt && item.expireAt < Date.now()) {
+        // 过期前重读一次：避免与并发 set 竞态把新数据误删
+        const fresh = await this.storage.get<CacheItem<T>>(key)
+        if (!fresh || (fresh.expireAt && fresh.expireAt < Date.now())) {
+          await this.storage.delete(key)
+          return null
+        }
+        logger.debug(`CacheSerive hit cache: ${key}`)
+        return fresh.value
       }
       logger.debug(`CacheSerive hit cache: ${key}`)
       return item.value

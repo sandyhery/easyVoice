@@ -61,10 +61,10 @@ describe('mapVoiceForEngine', () => {
     expect(mapVoiceForEngine('edge-tts', undefined)).toBeUndefined()
   })
 
-  test('空字符串 voice 透传空字符串', () => {
-    // 设计选择：把空 voice 当作 caller 显式传了空串，由引擎层校验
-    expect(mapVoiceForEngine('openai-tts', '')).toBe('')
-    expect(mapVoiceForEngine('edge-tts', '')).toBe('')
+  test('空字符串 / 空白 voice 视为未传（返回 undefined）', () => {
+    expect(mapVoiceForEngine('openai-tts', '')).toBeUndefined()
+    expect(mapVoiceForEngine('edge-tts', '')).toBeUndefined()
+    expect(mapVoiceForEngine('openai-tts', '   ')).toBeUndefined()
   })
 
   test('未知引擎透传原 voice', () => {

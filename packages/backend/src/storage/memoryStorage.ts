@@ -27,7 +27,8 @@ export class MemoryStorage extends BaseStorage {
     // 先 snapshot，再删除（避免迭代中修改 Map）
     const toDelete: string[] = []
     for (const [key, item] of this.cache) {
-      if (item?.expireAt < now) toDelete.push(key)
+      // 0 视为永不过期（与 cache.service.ts 语义一致）
+      if (item?.expireAt && item.expireAt < now) toDelete.push(key)
     }
     for (const key of toDelete) this.cache.delete(key)
   }

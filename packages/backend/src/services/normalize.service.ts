@@ -181,16 +181,6 @@ export function numberToCn(raw: string): string {
 }
 
 /**
- * 把任意长串纯数字（不限定长度）按位读
- *  - "12345678901234567890" -> 一二三四五六七八九零一...
- *  - 与 loneNumberToCn 不同：此函数无视"前后是否有 \w"边界（用于 numberToCn 主路径已截取出纯数字串后）
- */
-function longStringDigitsToCn(s: string): string {
-  // s 必须是纯数字串（主路径已剥离符号/小数）
-  return s.split('').map(d => CN_DIGITS[Number(d)]).join('')
-}
-
-/**
  * 百分号：12.5% -> "百分之十二点五"
  *         120% -> "百分之一百二十"
  */

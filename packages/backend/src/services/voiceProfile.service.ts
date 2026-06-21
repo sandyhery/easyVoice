@@ -68,6 +68,15 @@ const profileSchema = z.object({
   description: z.string().max(500).optional(),
 })
 
+// 完整 profile schema（含 id/owner/timestamps，readAll 时校验整个数组）
+const fullProfileSchema = profileSchema.extend({
+  id: z.string().min(1),
+  owner: z.string().min(1),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().min(1),
+})
+const profilesArraySchema = z.array(fullProfileSchema)
+
 // 内存缓存：避免每次请求都读盘
 let cache: { profiles: VoiceProfile[]; mtime: number } | null = null
 
@@ -109,8 +118,25 @@ async function readAll(): Promise<VoiceProfile[]> {
   if (cache) return [...cache.profiles] // 浅拷贝：避免 caller 直接修改 cache 引用
   try {
     const txt = await fs.readFile(PROFILE_FILE, 'utf8')
-    const obj = JSON.parse(txt) as { profiles: VoiceProfile[] }
-    cache = { profiles: obj.profiles || [], mtime: Date.now() }
+    const obj = JSON.parse(txt) as { profiles?: unknown }
+    // Zod 校验：损坏 JSON（手工注入、版本不兼容）会被拒绝
+    const result = profilesArraySchema.safeParse(obj.profiles || [])
+    if (!result.success) {
+      // 损坏数据：备份原文件到 .corrupt 后用空数组启动
+      const corruptPath = `${PROFILE_FILE}.corrupt.${Date.now()}`
+      try {
+        await fs.copyFile(PROFILE_FILE, corruptPath)
+        logger.error(
+          `profiles.json validation failed, backed up to ${corruptPath}, starting empty`,
+          result.error
+        )
+      } catch (e) {
+        logger.error('Failed to backup corrupt profiles.json', e)
+      }
+      cache = { profiles: [], mtime: Date.now() }
+      return []
+    }
+    cache = { profiles: result.data, mtime: Date.now() }
     return [...cache.profiles]
   } catch (e) {
     logger.warn('profiles.json read failed, starting empty', e)
@@ -126,7 +152,16 @@ async function writeAll(profiles: VoiceProfile[]): Promise<void> {
 
 function getOwner(req: Request): string {
   // 预留：将来可从 req.user.id / session / token 解析
-  return (req.headers['x-user-id'] as string) || DEFAULT_OWNER
+  // sanitize: 限制长度 + 字符集，避免 header 被滥用注入垃圾数据
+  const raw = req.headers['x-user-id']
+  const v = Array.isArray(raw) ? raw[0] : raw
+  if (typeof v !== 'string') return DEFAULT_OWNER
+  const cleaned = v.trim().slice(0, 64)
+  if (!/^[a-zA-Z0-9_\-@.]+$/.test(cleaned)) {
+    logger.warn(`Invalid x-user-id, fallback to ${DEFAULT_OWNER}: ${cleaned.slice(0, 16)}`)
+    return DEFAULT_OWNER
+  }
+  return cleaned
 }
 
 export const voiceProfileRouter = Router()

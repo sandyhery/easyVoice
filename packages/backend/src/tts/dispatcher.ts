@@ -56,9 +56,9 @@ export function parseRateToSpeed(rate?: string): number | undefined {
  *  - openai-tts: Edge voice 不在 OpenAI 内置列表，映射为默认 'alloy'
  */
 const OPENAI_DEFAULT_VOICE = 'alloy'
-const OPENAI_VOICE_PREFIXES = ['en-US', 'en-GB', 'zh-CN', 'ja-JP', 'fr-FR', 'de-DE']
 export function mapVoiceForEngine(engine: string, voice?: string): string | undefined {
-  if (!voice) return voice
+  // 空 / 空白 voice 视为未传：让引擎用默认
+  if (!voice || !voice.trim()) return undefined
   if (engine === 'openai-tts') {
     // OpenAI 引擎只认内置 voice：alloy/echo/fable/onyx/nova/shimmer
     const openAiVoices = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer']
@@ -105,18 +105,4 @@ export function listEngines() {
   return ttsPluginManager.getAllEngines().map((e) => ({
     name: e.name,
   }))
-}
-
-/**
- * 列出所有引擎的完整 metadata（同步版本，引擎在 init 时已加载）
- */
-export async function listEnginesWithMeta() {
-  const engines = ttsPluginManager.getAllEngines()
-  return Promise.all(
-    engines.map(async (e) => ({
-      name: e.name,
-      supportedLanguages: await e.getSupportedLanguages(),
-      voices: (await e.getVoiceOptions?.()) || [],
-    }))
-  )
 }

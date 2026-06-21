@@ -54,6 +54,10 @@ export async function runEdgeTTS({
 export const generateSingleVoice = async (
   params: Omit<EdgeSchema, 'useLLM'> & { output: string }
 ) => {
+  // 非 edge-tts 引擎：不重试（OpenAI/Kokoro 自己负责 retry）
+  if (params.engine && params.engine !== 'edge-tts') {
+    return (await runEdgeTTS({ ...params })) as TTSResult
+  }
   let result: TTSResult = {
     audio: '',
     srt: '',
@@ -69,7 +73,11 @@ export const generateSingleVoice = async (
 export const generateSingleVoiceStream = async (
   params: Omit<EdgeSchema, 'useLLM'> & { output: string; outputType?: string }
 ) => {
-  // 流式也加重试：edge-tts 的 WebSocket 偶发会被服务端 close
+  // 非 edge-tts 引擎：直接调一次，由引擎自己负责 retry（OpenAI/Kokoro 内部重试机制不同）
+  if (params.engine && params.engine !== 'edge-tts') {
+    return runEdgeTTS({ ...params, outputType: 'stream' })
+  }
+  // edge-tts 加重试：WebSocket 偶发会被服务端 close
   let lastErr: unknown
   for (let attempt = 0; attempt < 4; attempt++) {
     try {
@@ -77,7 +85,6 @@ export const generateSingleVoiceStream = async (
     } catch (err) {
       lastErr = err
       const msg = (err as Error)?.message || String(err)
-      // 流已建立才出错，重试会重新建立连接
       if (attempt < 3) {
         await new Promise((r) => setTimeout(r, 600 * (attempt + 1)))
         console.warn(`generateSingleVoiceStream retry ${attempt + 1}/3: ${msg}`)
