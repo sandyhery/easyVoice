@@ -803,27 +803,13 @@ const generateAudioTask = async () => {
 }
 // 收集所有活动轮询 timer，组件卸载时统一清理
 const activePollTimers = new Set<ReturnType<typeof setInterval>>()
-const beforeUnloadHandler = async (event: BeforeUnloadEvent) => {
-  console.log(`beforeUnloadHandler:`, event.target)
+const beforeUnloadHandler = (event: BeforeUnloadEvent) => {
+  // 仅当有未下载的音频时，提示用户确认
   if (generationStore.audioList.length > 0) {
-    // 同步阻止关闭，显示浏览器默认提示
+    // 浏览器原生 beforeunload：只显示浏览器默认提示（自定义 ElMessageBox 在此不可用）
     event.preventDefault()
     event.returnValue = '操作将删除页面上的所有音频文件，请确认已经下载！'
     return event.returnValue
-  }
-
-  if (generationStore.audioList.length > 0) {
-    try {
-      await ElMessageBox.confirm('操作将删除页面上的所有音频文件，请确认已经下载！', '操作提示', {
-        confirmButtonText: '确定',
-        cancelButtonText: '取消',
-        type: 'warning',
-      })
-    } catch (error) {
-      console.log(`取消关闭页面`)
-      event.preventDefault()
-      event.returnValue = ''
-    }
   }
 }
 
